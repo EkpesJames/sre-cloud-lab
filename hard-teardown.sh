@@ -14,4 +14,4 @@ docker volume rm grafana-data 2>/dev/null
 # Clean unused resources
 docker system prune -f
 
-echo ""Full reset complete"
+echo "Full reset complete"

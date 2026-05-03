@@ -57,7 +57,7 @@ docker run -d \
   grafana/grafana
 
 echo ""
-echo "✅ Environment started!"
+echo " Environment started!"
 echo "App:          http://localhost:8080"
 echo "Prometheus:   http://localhost:9090"
 echo "Alertmanager: http://localhost:9093"
