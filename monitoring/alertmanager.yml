@@ -1,0 +1,17 @@
+global:
+  resolve_timeout: 30s
+
+route:
+  receiver: "slack-alerts"
+
+receivers:
+  - name: "slack-alerts"
+    slack_configs:
+      - api_url: "SLACK_WEBHOOK_PLACEHOLDER"
+        channel: "#general"
+        send_resolved: true
+        title: "🚨 Alert: {{ .CommonLabels.alertname }}"
+        text: |
+          *Status:* {{ .Status }}
+          *Instance:* {{ .CommonLabels.instance }}
+          *Summary:* {{ .CommonAnnotations.summary }}

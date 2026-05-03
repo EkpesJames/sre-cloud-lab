@@ -1,0 +1,10 @@
+groups:
+  - name: cloud-lab-alerts
+    rules:
+      - alert: AppDown
+        expr: up == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Application is down"
