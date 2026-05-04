@@ -1,0 +1,147 @@
+#!/bin/bash
+
+set -e
+
+NETWORK="cloud-lab-net"
+VOLUME="grafana-data"
+
+function create_network() {
+  docker network inspect $NETWORK >/dev/null 2>&1 || docker network create $NETWORK
+}
+
+function create_volume() {
+  docker volume inspect $VOLUME >/dev/null 2>&1 || docker volume create $VOLUME
+}
+
+function build_app() {
+  echo "Building app image..."
+  docker build -t cloud-lab -f docker/Dockerfile .
+}
+
+function start_all() {
+  echo "Starting environment..."
+
+  create_network
+  create_volume
+  build_app
+
+  docker rm -f cloud-app prometheus alertmanager grafana 2>/dev/null || true
+
+  docker run -d --name cloud-app \
+    --network $NETWORK \
+    -p 8080:80 \
+    cloud-lab
+
+  docker run -d --name prometheus \
+    --network $NETWORK \
+    -p 9090:9090 \
+    -v "$(pwd)/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml" \
+    -v "$(pwd)/monitoring/alerts.yml:/etc/prometheus/alerts.yml" \
+    prom/prometheus
+
+  docker run -d --name alertmanager \
+    --network $NETWORK \
+    -p 9093:9093 \
+    -v "$(pwd)/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml" \
+    prom/alertmanager
+
+  docker run -d --name grafana \
+    --network $NETWORK \
+    -p 3000:3000 \
+    -v $VOLUME:/var/lib/grafana \
+    grafana/grafana
+
+  echo " Environment started"
+}
+
+function stop_all() {
+  echo "Stopping environment..."
+  docker rm -f cloud-app prometheus alertmanager grafana 2>/dev/null || true
+  docker network rm $NETWORK 2>/dev/null || true
+  echo " Stopped (data preserved)"
+}
+
+function reset_all() {
+  echo "FULL RESET..."
+  docker rm -f cloud-app prometheus alertmanager grafana 2>/dev/null || true
+  docker network rm $NETWORK 2>/dev/null || true
+  docker volume rm $VOLUME 2>/dev/null || true
+  docker system prune -f
+  echo " Fully reset"
+}
+
+function outage() {
+  echo "Simulating outage..."
+  docker stop cloud-app
+}
+
+function recover() {
+  echo "Recovering app..."
+  docker start cloud-app
+}
+
+function status() {
+  echo "Container status:"
+  docker ps -a --filter "name=cloud-app|prometheus|alertmanager|grafana"
+
+  echo ""
+  echo "Endpoint checks:"
+  curl -s http://localhost:8080 >/dev/null && echo "App: OK" || echo "App: DOWN"
+  curl -s http://localhost:9090 >/dev/null && echo "Prometheus: OK" || echo "Prometheus: DOWN"
+  curl -s http://localhost:9093 >/dev/null && echo "Alertmanager: OK" || echo "Alertmanager: DOWN"
+  curl -s http://localhost:3000 >/dev/null && echo "Grafana: OK" || echo "Grafana: DOWN"
+}
+
+function chaos() {
+  echo "Starting chaos testing..."
+
+  while true; do
+    ACTION=$((RANDOM % 3))
+
+    case $ACTION in
+      0)
+        echo "Chaos: Stopping cloud-app"
+        docker stop cloud-app 2>/dev/null || true
+        ;;
+      1)
+        echo "Chaos: Starting cloud-app"
+        docker start cloud-app 2>/dev/null || true
+        ;;
+      2)
+        echo " Chaos: CPU stress on cloud-app"
+        docker exec cloud-app sh -c "yes > /dev/null &" 2>/dev/null || true
+        sleep 5
+        docker exec cloud-app pkill yes 2>/dev/null || true
+        ;;
+    esac
+
+    sleep 10
+  done
+}
+
+case "$1" in
+  up)
+    start_all
+    ;;
+  down)
+    stop_all
+    ;;
+  reset)
+    reset_all
+    ;;
+  outage)
+    outage
+    ;;
+  recover)
+    recover
+    ;;
+  status)
+    status
+    ;;
+  chaos)
+    chaos
+    ;;
+  *)
+    echo "Usage: ./lab {up|down|reset|outage|recover|status}"
+    ;;
+esac

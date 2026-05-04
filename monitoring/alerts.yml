@@ -3,8 +3,15 @@ groups:
     rules:
       - alert: AppDown
         expr: up == 0
-        for: 30s
+        for: 10s
         labels:
           severity: critical
         annotations:
-          summary: "Application is down"
+          summary: "Triggering Critical Alert on Cloud App"
+      - alert: HighLatency
+        expr: vector(1)
+        for: 5s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Triggering Warning Alert on Cloud App"
