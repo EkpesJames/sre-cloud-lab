@@ -1,0 +1,83 @@
+groups:
+
+  # ── Raw SLI Recording Rules ──────────────────────────────────────────────────
+  # These pre-compute expensive queries so dashboards and alerts stay fast.
+
+  - name: slo_recording_rules
+    interval: 30s
+    rules:
+
+      # Success rate over 5m window
+      - record: slo:success_rate_5m
+        expr: |
+          rate(http_requests_total{status="success"}[5m])
+          /
+          rate(http_requests_total[5m])
+
+      # Success rate over 1h window (for burn rate calculation)
+      - record: slo:success_rate_1h
+        expr: |
+          rate(http_requests_total{status="success"}[1h])
+          /
+          rate(http_requests_total[1h])
+
+      # Success rate over 6h window
+      - record: slo:success_rate_6h
+        expr: |
+          rate(http_requests_total{status="success"}[6h])
+          /
+          rate(http_requests_total[6h])
+
+      # Error rate over 5m window
+      - record: slo:error_rate_5m
+        expr: |
+          rate(http_requests_total{status="error"}[5m])
+          /
+          rate(http_requests_total[5m])
+
+      # p50 latency
+      - record: slo:latency_p50_5m
+        expr: histogram_quantile(0.50, rate(http_request_duration_seconds_bucket[5m]))
+
+      # p95 latency (SLO target)
+      - record: slo:latency_p95_5m
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))
+
+      # p99 latency
+      - record: slo:latency_p99_5m
+        expr: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m]))
+
+      # Request throughput (requests per second)
+      - record: slo:request_rate_5m
+        expr: rate(http_requests_total[5m])
+
+  # ── Error Budget Recording Rules ─────────────────────────────────────────────
+  # SLO target: 99% availability (error budget = 1% of requests can fail)
+
+  - name: error_budget_rules
+    interval: 30s
+    rules:
+
+      # Remaining error budget as a ratio (1.0 = full, 0.0 = exhausted)
+      - record: slo:error_budget_remaining
+        expr: |
+          1 - (
+            (1 - slo:success_rate_1h) / (1 - 0.99)
+          )
+
+      # Burn rate over 1h — how fast we're consuming the monthly budget
+      # A burn rate of 1.0 = consuming budget at exactly the sustainable rate
+      # A burn rate of 14.4 = will exhaust monthly budget in 2 hours
+      - record: slo:error_budget_burn_rate_1h
+        expr: |
+          (1 - slo:success_rate_1h) / (1 - 0.99)
+
+      # Burn rate over 6h window (slower burn detection)
+      - record: slo:error_budget_burn_rate_6h
+        expr: |
+          (1 - slo:success_rate_6h) / (1 - 0.99)
+
+      # Monthly error budget consumed so far (approximated from 1h window)
+      - record: slo:error_budget_consumed_ratio
+        expr: |
+          clamp_max(1 - slo:error_budget_remaining, 1)

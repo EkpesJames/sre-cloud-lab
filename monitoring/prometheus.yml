@@ -1,15 +1,47 @@
 global:
-  scrape_interval: 5s
+  scrape_interval: 15s       # How often Prometheus scrapes targets
+  evaluation_interval: 15s   # How often rules are evaluated
+  scrape_timeout: 10s
 
-rule_files:
-  - /etc/prometheus/alerts.yml
-
-scrape_configs:
-  - job_name: "cloud-lab"
-    static_configs:
-      - targets: ["cloud-app:80"]
-
+# Alerting configuration
 alerting:
   alertmanagers:
     - static_configs:
         - targets: ["alertmanager:9093"]
+      timeout: 5s
+
+# Rule files — alerts and recording rules loaded separately for clarity
+rule_files:
+  - /etc/prometheus/alerts.yml
+  - /etc/prometheus/recording_rules.yml
+
+# Scrape configurations
+scrape_configs:
+
+  # ── Cloud Lab Application ─────────────────────────────────────────────────
+  - job_name: "cloud-lab"
+    metrics_path: /metrics          # explicit — don't rely on default
+    scrape_interval: 5s             # faster scrape for lab responsiveness
+    static_configs:
+      - targets: ["cloud-app:80"]
+        labels:
+          env: "lab"
+          service: "cloud-lab-api"
+
+  # ── Prometheus Self-Monitoring ────────────────────────────────────────────
+  - job_name: "prometheus"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["localhost:9090"]
+        labels:
+          env: "lab"
+          service: "prometheus"
+
+  # ── Alertmanager Self-Monitoring ──────────────────────────────────────────
+  - job_name: "alertmanager"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["alertmanager:9093"]
+        labels:
+          env: "lab"
+          service: "alertmanager"
