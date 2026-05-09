@@ -2,6 +2,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Install curl for Docker health check
+# python:3.11-slim does not include it by default
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY app/ /app
 
 RUN pip install -r requirements.txt
@@ -11,7 +16,8 @@ RUN pip install -r requirements.txt
 # Timeout: fail if no response within 5 seconds
 # Retries: 3 failures = unhealthy
 # Start period: give the app 10 seconds to start before checking
-HEALTHCHECK --interval=10s --timeout=5s --retries=3 --start-period=10s \
-  CMD curl -f http://localhost/health/live || exit 1
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 --start-period=15s \
+  CMD curl -f http://localhost:80/health/live || exit 1
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "80"]
+

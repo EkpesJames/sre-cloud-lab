@@ -69,20 +69,16 @@ function start_all() {
     -v "$(pwd)/monitoring/recording_rules.yml:/etc/prometheus/recording_rules.yml" \
     prom/prometheus
 
-  # ── Alertmanager (env vars substituted at startup) ────────────────────────
+  # ── Alertmanager ─────────────────────────────────────────────────────────
+  # envsubst replaces ${VAR} placeholders with real values from .env
+  # before mounting the config — Alertmanager never sees raw variables
+  envsubst < "$(pwd)/monitoring/alertmanager.yml" > /tmp/alertmanager-resolved.yml
+
   docker run -d --name alertmanager \
     --network $NETWORK \
     -p 9093:9093 \
     --restart unless-stopped \
-    --env SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL}" \
-    --env SLACK_CHANNEL="${SLACK_CHANNEL:-#general}" \
-    --env SMTP_HOST="${SMTP_HOST}" \
-    --env SMTP_PORT="${SMTP_PORT:-587}" \
-    --env SMTP_FROM="${SMTP_FROM}" \
-    --env SMTP_USERNAME="${SMTP_USERNAME}" \
-    --env SMTP_PASSWORD="${SMTP_PASSWORD}" \
-    --env ALERT_EMAIL_TO="${ALERT_EMAIL_TO}" \
-    -v "$(pwd)/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml" \
+    -v "/tmp/alertmanager-resolved.yml:/etc/alertmanager/alertmanager.yml:ro" \
     prom/alertmanager \
     --config.file=/etc/alertmanager/alertmanager.yml
 

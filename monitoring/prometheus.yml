@@ -28,32 +28,6 @@ scrape_configs:
           env: "lab"
           service: "cloud-lab-api"
 
-  # ── Health endpoint monitoring ────────────────────────────────────────────
-  # Prometheus probes /health/live and /health/ready as a blackbox check
-  - job_name: "cloud-lab-health"
-    metrics_path: /probe
-    scrape_interval: 10s
-    params:
-      module: [http_2xx]
-    static_configs:
-      - targets:
-          - "http://cloud-app-1:80/health/ready"
-          - "http://cloud-app-2:80/health/ready"
-          - "http://cloud-app-3:80/health/ready"
-        labels:
-          env: "lab"
-          probe: "readiness"
-
-  # ── Nginx load balancer ───────────────────────────────────────────────────
-  - job_name: "nginx"
-    metrics_path: /nginx-status
-    scrape_interval: 15s
-    static_configs:
-      - targets: ["nginx-lb:80"]
-        labels:
-          env: "lab"
-          service: "nginx-lb"
-
   # ── Prometheus self-monitoring ────────────────────────────────────────────
   - job_name: "prometheus"
     metrics_path: /metrics
@@ -71,3 +45,4 @@ scrape_configs:
         labels:
           env: "lab"
           service: "alertmanager"
+

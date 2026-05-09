@@ -46,3 +46,4 @@ receivers:
           <p><strong>Status:</strong> {{ .Status }}</p>
           <p><strong>Summary:</strong> {{ .CommonAnnotations.summary }}</p>
           <p><strong>Description:</strong> {{ .CommonAnnotations.description }}</p>
+
