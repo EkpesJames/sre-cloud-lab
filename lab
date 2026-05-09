@@ -2,9 +2,19 @@
 
 set -e
 
+# ── Load environment variables from .env ──────────────────────────────────────
+if [[ -f .env ]]; then
+  export $(grep -v '^#' .env | grep -v '^$' | xargs)
+  echo "✓ Loaded config from .env"
+else
+  echo "⚠ No .env file found — copy .env.example to .env and fill in values"
+  echo "  Running with defaults (Slack/email notifications will not work)"
+fi
+
 NETWORK="cloud-lab-net"
 VOLUME="grafana-data"
 
+# ── Internal helpers ──────────────────────────────────────────────────────────
 function create_network() {
   docker network inspect $NETWORK >/dev/null 2>&1 || docker network create $NETWORK
 }
@@ -18,21 +28,36 @@ function build_app() {
   docker build -t cloud-lab -f docker/Dockerfile .
 }
 
+# ── Commands ──────────────────────────────────────────────────────────────────
+
 function start_all() {
   echo "Starting environment..."
-
   create_network
   create_volume
   build_app
 
-  docker rm -f cloud-app prometheus alertmanager grafana 2>/dev/null || true
+  docker rm -f cloud-app-1 cloud-app-2 cloud-app-3 nginx-lb \
+               prometheus alertmanager grafana 2>/dev/null || true
 
-  # ── App ──────────────────────────────────────────────────────────────────
-  docker run -d --name cloud-app \
+  # ── App instances (3x for load balancing demo) ───────────────────────────
+  for i in 1 2 3; do
+    docker run -d --name "cloud-app-$i" \
+      --network $NETWORK \
+      --restart unless-stopped \
+      --env APP_ERROR_RATE="${APP_ERROR_RATE:-0.30}" \
+      --env APP_LATENCY_SECONDS="${APP_LATENCY_SECONDS:-0.2}" \
+      cloud-lab
+    echo "  ✓ cloud-app-$i started"
+  done
+
+  # ── Nginx load balancer (port 8080 → 3 app instances) ────────────────────
+  docker run -d --name nginx-lb \
     --network $NETWORK \
     -p 8080:80 \
     --restart unless-stopped \
-    cloud-lab
+    -v "$(pwd)/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro" \
+    nginx:alpine
+  echo "  ✓ nginx load balancer started (8080 → cloud-app-1/2/3)"
 
   # ── Prometheus ───────────────────────────────────────────────────────────
   docker run -d --name prometheus \
@@ -44,15 +69,24 @@ function start_all() {
     -v "$(pwd)/monitoring/recording_rules.yml:/etc/prometheus/recording_rules.yml" \
     prom/prometheus
 
-  # ── Alertmanager ─────────────────────────────────────────────────────────
+  # ── Alertmanager (env vars substituted at startup) ────────────────────────
   docker run -d --name alertmanager \
     --network $NETWORK \
     -p 9093:9093 \
     --restart unless-stopped \
+    --env SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL}" \
+    --env SLACK_CHANNEL="${SLACK_CHANNEL:-#general}" \
+    --env SMTP_HOST="${SMTP_HOST}" \
+    --env SMTP_PORT="${SMTP_PORT:-587}" \
+    --env SMTP_FROM="${SMTP_FROM}" \
+    --env SMTP_USERNAME="${SMTP_USERNAME}" \
+    --env SMTP_PASSWORD="${SMTP_PASSWORD}" \
+    --env ALERT_EMAIL_TO="${ALERT_EMAIL_TO}" \
     -v "$(pwd)/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml" \
-    prom/alertmanager
+    prom/alertmanager \
+    --config.file=/etc/alertmanager/alertmanager.yml
 
-  # ── Grafana (with provisioned datasource + dashboards) ───────────────────
+  # ── Grafana ───────────────────────────────────────────────────────────────
   docker run -d --name grafana \
     --network $NETWORK \
     -p 3000:3000 \
@@ -64,126 +98,181 @@ function start_all() {
     grafana/grafana
 
   echo ""
-  echo "✓ Environment started"
+  echo "✓ Full environment started"
   echo ""
-  echo "  App        → http://localhost:8080"
-  echo "  Prometheus → http://localhost:9090"
-  echo "  Grafana    → http://localhost:3000  (admin/admin)"
-  echo "  Alertmgr   → http://localhost:9093"
+  echo "  App (via Nginx LB) → http://localhost:8080"
+  echo "  Prometheus         → http://localhost:9090"
+  echo "  Grafana            → http://localhost:3000  (admin/admin)"
+  echo "  Alertmanager       → http://localhost:9093"
+  echo ""
+  echo "  Instances: cloud-app-1, cloud-app-2, cloud-app-3"
+  echo "  Kill one with: ./lab kill-instance 1"
 }
 
 function stop_all() {
   echo "Stopping environment..."
-  docker rm -f cloud-app prometheus alertmanager grafana 2>/dev/null || true
+  docker rm -f cloud-app-1 cloud-app-2 cloud-app-3 nginx-lb \
+               prometheus alertmanager grafana 2>/dev/null || true
   docker network rm $NETWORK 2>/dev/null || true
-  echo "✓ Stopped (Grafana data preserved in volume)"
+  echo "✓ Stopped (Grafana data preserved)"
 }
 
 function reset_all() {
   echo "FULL RESET — removing all containers, networks, and volumes..."
-  docker rm -f cloud-app prometheus alertmanager grafana 2>/dev/null || true
+  docker rm -f cloud-app-1 cloud-app-2 cloud-app-3 nginx-lb \
+               prometheus alertmanager grafana 2>/dev/null || true
   docker network rm $NETWORK 2>/dev/null || true
   docker volume rm $VOLUME 2>/dev/null || true
   docker system prune -f
   echo "✓ Fully reset"
 }
 
+function kill_instance() {
+  local n="${2:-1}"
+  echo "⚠ Killing cloud-app-$n (Nginx will failover to remaining instances)"
+  docker stop "cloud-app-$n"
+  echo "  Watch Prometheus: up{instance='cloud-app-$n:80'} should show 0"
+  echo "  Nginx will route traffic to the other two instances automatically"
+  echo "  Restore with: ./lab restore-instance $n"
+}
+
+function restore_instance() {
+  local n="${2:-1}"
+  echo "Restoring cloud-app-$n..."
+  docker start "cloud-app-$n"
+  echo "✓ cloud-app-$n restarted — Nginx will resume sending traffic"
+}
+
 function outage() {
-  echo "⚠ Simulating outage — stopping cloud-app..."
-  docker stop cloud-app
-  echo "  AppDown alert should fire within 10–15 seconds"
-  echo "  Watch: http://localhost:9090/alerts"
+  echo "⚠ Full outage — stopping ALL app instances"
+  docker stop cloud-app-1 cloud-app-2 cloud-app-3 2>/dev/null || true
+  echo "  AppDown alert fires within 10-15 seconds"
+  echo "  Restore with: ./lab recover"
 }
 
 function recover() {
-  echo "Recovering cloud-app..."
-  docker start cloud-app
-  echo "✓ App restarted — monitor recovery in Grafana"
+  echo "Recovering all app instances..."
+  docker start cloud-app-1 cloud-app-2 cloud-app-3 2>/dev/null || true
+  echo "✓ All instances restarted"
+}
+
+function break_dep() {
+  echo "⚠ Breaking simulated dependency on all instances..."
+  for i in 1 2 3; do
+    curl -s "http://localhost:8080/health/dependency/break" >/dev/null || true
+  done
+  echo "  /health/ready now returns 503 — readiness probe failing"
+}
+
+function restore_dep() {
+  echo "Restoring dependency..."
+  curl -s "http://localhost:8080/health/dependency/restore" >/dev/null || true
+  echo "✓ Dependency restored"
 }
 
 function status() {
-  echo "──────────────────────────────────────"
-  echo "Container status:"
-  docker ps -a --filter "name=cloud-app" \
-              --filter "name=prometheus" \
-              --filter "name=alertmanager" \
-              --filter "name=grafana" \
-              --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+  echo "──────────────────────────────────────────────"
+  echo "Container health:"
+  docker ps -a \
+    --filter "name=cloud-app-1" \
+    --filter "name=cloud-app-2" \
+    --filter "name=cloud-app-3" \
+    --filter "name=nginx-lb" \
+    --filter "name=prometheus" \
+    --filter "name=alertmanager" \
+    --filter "name=grafana" \
+    --format "  {{.Names}}\t{{.Status}}"
   echo ""
-  echo "Endpoint health checks:"
-  curl -sf http://localhost:8080/       >/dev/null && echo "  ✓ App (8080)        OK" || echo "  ✗ App (8080)        DOWN"
-  curl -sf http://localhost:8080/metrics >/dev/null && echo "  ✓ Metrics endpoint  OK" || echo "  ✗ Metrics endpoint  DOWN"
-  curl -sf http://localhost:9090/       >/dev/null && echo "  ✓ Prometheus (9090) OK" || echo "  ✗ Prometheus (9090) DOWN"
-  curl -sf http://localhost:9093/       >/dev/null && echo "  ✓ Alertmanager      OK" || echo "  ✗ Alertmanager      DOWN"
-  curl -sf http://localhost:3000/       >/dev/null && echo "  ✓ Grafana (3000)    OK" || echo "  ✗ Grafana (3000)    DOWN"
-  echo "──────────────────────────────────────"
+  echo "Endpoint health:"
+  curl -sf http://localhost:8080/          >/dev/null && echo "  ✓ Nginx LB (8080)       OK" || echo "  ✗ Nginx LB (8080)       DOWN"
+  curl -sf http://localhost:8080/health/live >/dev/null && echo "  ✓ Liveness probe        OK" || echo "  ✗ Liveness probe        FAIL"
+  curl -sf http://localhost:8080/health/ready >/dev/null && echo "  ✓ Readiness probe       OK" || echo "  ✗ Readiness probe       NOT READY"
+  curl -sf http://localhost:9090/          >/dev/null && echo "  ✓ Prometheus (9090)     OK" || echo "  ✗ Prometheus (9090)     DOWN"
+  curl -sf http://localhost:9093/          >/dev/null && echo "  ✓ Alertmanager (9093)   OK" || echo "  ✗ Alertmanager (9093)   DOWN"
+  curl -sf http://localhost:3000/          >/dev/null && echo "  ✓ Grafana (3000)        OK" || echo "  ✗ Grafana (3000)        DOWN"
+  echo "──────────────────────────────────────────────"
 }
 
 function chaos() {
   echo "Starting chaos testing — Ctrl+C to stop"
-  echo ""
-
   while true; do
-    ACTION=$((RANDOM % 4))
-
+    ACTION=$((RANDOM % 5))
     case $ACTION in
       0)
-        echo "[chaos] Stopping cloud-app (simulating crash)"
-        docker stop cloud-app 2>/dev/null || true
-        sleep $((RANDOM % 15 + 5))
-        echo "[chaos] Auto-recovering cloud-app"
-        docker start cloud-app 2>/dev/null || true
+        INSTANCE=$((RANDOM % 3 + 1))
+        echo "[chaos] Killing cloud-app-$INSTANCE"
+        docker stop "cloud-app-$INSTANCE" 2>/dev/null || true
+        sleep $((RANDOM % 20 + 10))
+        echo "[chaos] Restoring cloud-app-$INSTANCE"
+        docker start "cloud-app-$INSTANCE" 2>/dev/null || true
         ;;
       1)
-        echo "[chaos] CPU stress on cloud-app (30s)"
-        docker exec cloud-app sh -c "yes > /dev/null & yes > /dev/null &" 2>/dev/null || true
-        sleep 30
-        docker exec cloud-app pkill yes 2>/dev/null || true
-        echo "[chaos] CPU stress ended"
+        echo "[chaos] Full outage — all instances down"
+        docker stop cloud-app-1 cloud-app-2 cloud-app-3 2>/dev/null || true
+        sleep $((RANDOM % 15 + 5))
+        echo "[chaos] Recovering all instances"
+        docker start cloud-app-1 cloud-app-2 cloud-app-3 2>/dev/null || true
         ;;
       2)
-        echo "[chaos] Memory pressure on cloud-app (20s)"
-        docker exec cloud-app sh -c "tail /dev/zero &" 2>/dev/null || true
+        INSTANCE=$((RANDOM % 3 + 1))
+        echo "[chaos] CPU stress on cloud-app-$INSTANCE (20s)"
+        docker exec "cloud-app-$INSTANCE" sh -c "yes > /dev/null & yes > /dev/null &" 2>/dev/null || true
         sleep 20
-        docker exec cloud-app pkill tail 2>/dev/null || true
-        echo "[chaos] Memory pressure ended"
+        docker exec "cloud-app-$INSTANCE" pkill yes 2>/dev/null || true
         ;;
       3)
-        echo "[chaos] Quiet period (no action)"
+        echo "[chaos] Breaking dependency (readiness probe fails)"
+        curl -s http://localhost:8080/health/dependency/break >/dev/null || true
+        sleep $((RANDOM % 15 + 10))
+        echo "[chaos] Restoring dependency"
+        curl -s http://localhost:8080/health/dependency/restore >/dev/null || true
+        ;;
+      4)
+        echo "[chaos] Quiet period"
         sleep $((RANDOM % 20 + 10))
         ;;
     esac
-
     sleep 5
   done
 }
 
 function logs() {
-  SERVICE="${2:-cloud-app}"
-  echo "Logs for: $SERVICE"
+  SERVICE="${2:-cloud-app-1}"
   docker logs "$SERVICE" --tail 50 -f
 }
 
+# ── Entry point ───────────────────────────────────────────────────────────────
 case "$1" in
-  up)      start_all ;;
-  down)    stop_all ;;
-  reset)   reset_all ;;
-  outage)  outage ;;
-  recover) recover ;;
-  status)  status ;;
-  chaos)   chaos ;;
-  logs)    logs "$@" ;;
+  up)               start_all ;;
+  down)             stop_all ;;
+  reset)            reset_all ;;
+  outage)           outage ;;
+  recover)          recover ;;
+  kill-instance)    kill_instance "$@" ;;
+  restore-instance) restore_instance "$@" ;;
+  break-dep)        break_dep ;;
+  restore-dep)      restore_dep ;;
+  status)           status ;;
+  chaos)            chaos ;;
+  logs)             logs "$@" ;;
   *)
-    echo "Usage: ./lab {up|down|reset|outage|recover|status|chaos|logs [service]}"
+    echo "Usage: ./lab <command>"
     echo ""
-    echo "  up        Start all containers"
-    echo "  down      Stop all containers (preserve data)"
-    echo "  reset     Full wipe — containers, network, volumes"
-    echo "  outage    Simulate app outage (stops cloud-app)"
-    echo "  recover   Recover from outage (starts cloud-app)"
-    echo "  status    Health check all endpoints"
-    echo "  chaos     Run randomised chaos testing loop"
-    echo "  logs      Tail container logs (default: cloud-app)"
+    echo "  up                    Start all containers (3 app instances + Nginx LB)"
+    echo "  down                  Stop all containers (preserve data)"
+    echo "  reset                 Full wipe — containers, network, volumes"
+    echo "  status                Health check all endpoints"
+    echo ""
+    echo "  outage                Stop all app instances (triggers AppDown alert)"
+    echo "  recover               Restart all app instances"
+    echo "  kill-instance [1|2|3] Kill one instance (Nginx fails over to others)"
+    echo "  restore-instance [N]  Restore a killed instance"
+    echo ""
+    echo "  break-dep             Simulate dependency failure (readiness probe fails)"
+    echo "  restore-dep           Restore dependency"
+    echo ""
+    echo "  chaos                 Randomised fault injection loop"
+    echo "  logs [container]      Tail container logs (default: cloud-app-1)"
     ;;
 esac
 
