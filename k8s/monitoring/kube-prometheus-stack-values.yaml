@@ -1,0 +1,137 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# kube-prometheus-stack values
+# Deploys: Prometheus, Grafana, Alertmanager, kube-state-metrics, node-exporter
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Grafana ───────────────────────────────────────────────────────────────────
+grafana:
+  enabled: true
+  adminPassword: "admin"
+
+  # Expose Grafana via NodePort so we can reach it from Windows browser
+  service:
+    type: NodePort
+    nodePort: 32000
+
+  # Pre-configure Prometheus as a datasource
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      url: http://loki:3100
+      access: proxy
+      isDefault: false
+
+  # Load your existing SRE dashboard automatically
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: cloud-lab
+          orgId: 1
+          folder: "Cloud Lab"
+          type: file
+          disableDeletion: false
+          updateIntervalSeconds: 30
+          options:
+            path: /var/lib/grafana/dashboards/cloud-lab
+
+  # Mount your existing dashboard JSON
+  dashboardsConfigMaps:
+    cloud-lab: "grafana-dashboards"
+
+  grafana.ini:
+    server:
+      root_url: "http://localhost:32000"
+
+# ── Prometheus ────────────────────────────────────────────────────────────────
+prometheus:
+  enabled: true
+
+  service:
+    type: NodePort
+    nodePort: 32090
+
+  prometheusSpec:
+    # Scrape interval
+    scrapeInterval: "15s"
+    evaluationInterval: "15s"
+
+    # Discover all ServiceMonitors and PodMonitors across all namespaces
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+
+    # Mount your existing alert and recording rules as ConfigMaps
+    additionalScrapeConfigs:
+      - job_name: "cloud-lab-app"
+        scrape_interval: "5s"
+        metrics_path: /metrics
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - app
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: (.+);(.+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - target_label: service
+            replacement: cloud-lab-api
+
+    # Load your existing recording rules and alert rules
+    additionalRulesForClusterRole: []
+
+# ── Alertmanager ──────────────────────────────────────────────────────────────
+alertmanager:
+  enabled: true
+
+  service:
+    type: NodePort
+    nodePort: 32093
+
+  alertmanagerSpec:
+    # We'll mount our existing alertmanager config via a secret
+    useExistingSecret: true
+    configSecret: alertmanager-config
+
+# ── kube-state-metrics ────────────────────────────────────────────────────────
+# Exposes K8s object state as metrics — pod restarts, deployment replicas, etc.
+kubeStateMetrics:
+  enabled: true
+
+# ── node-exporter ─────────────────────────────────────────────────────────────
+# Exposes host-level metrics — CPU, memory, disk, network
+nodeExporter:
+  enabled: true
+
+# ── Default scraping of K8s components ───────────────────────────────────────
+kubeApiServer:
+  enabled: true
+
+kubelet:
+  enabled: true
+
+kubeControllerManager:
+  enabled: false   # not accessible in k3s
+
+kubeScheduler:
+  enabled: false   # not accessible in k3s
+
+kubeProxy:
+  enabled: false   # not accessible in k3s
+
+kubeEtcd:
+  enabled: false   # not accessible in k3s
