@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloud-lab-config
+  namespace: app
+data:
+  APP_ERROR_RATE: "0.30"
+  APP_LATENCY_SECONDS: "0.2"
+  SMTP_HOST: "smtp.mail.yahoo.com"
+  SMTP_PORT: "587"
+  SLACK_CHANNEL: "#general"
+
