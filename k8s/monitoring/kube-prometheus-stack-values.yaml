@@ -1,6 +1,6 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# kube-prometheus-stack values
-# Deploys: Prometheus, Grafana, Alertmanager, kube-state-metrics, node-exporter
+# kube-prometheus-stack values — WSL2 compatible
+# Fixes: duplicate default datasource, node-exporter disabled (WSL2 limitation)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Grafana ───────────────────────────────────────────────────────────────────
@@ -8,20 +8,18 @@ grafana:
   enabled: true
   adminPassword: "admin"
 
-  # Expose Grafana via NodePort so we can reach it from Windows browser
   service:
     type: NodePort
     nodePort: 32000
 
-  # Pre-configure Prometheus as a datasource
+  # ── Datasources — only ONE can be isDefault: true ─────────────────────────
   additionalDataSources:
     - name: Loki
       type: loki
       url: http://loki:3100
       access: proxy
-      isDefault: false
+      isDefault: false    # Prometheus is default, Loki is secondary
 
-  # Load your existing SRE dashboard automatically
   dashboardProviders:
     dashboardproviders.yaml:
       apiVersion: 1
@@ -35,7 +33,6 @@ grafana:
           options:
             path: /var/lib/grafana/dashboards/cloud-lab
 
-  # Mount your existing dashboard JSON
   dashboardsConfigMaps:
     cloud-lab: "grafana-dashboards"
 
@@ -52,16 +49,13 @@ prometheus:
     nodePort: 32090
 
   prometheusSpec:
-    # Scrape interval
     scrapeInterval: "15s"
     evaluationInterval: "15s"
 
-    # Discover all ServiceMonitors and PodMonitors across all namespaces
     serviceMonitorSelectorNilUsesHelmValues: false
     podMonitorSelectorNilUsesHelmValues: false
     ruleSelectorNilUsesHelmValues: false
 
-    # Mount your existing alert and recording rules as ConfigMaps
     additionalScrapeConfigs:
       - job_name: "cloud-lab-app"
         scrape_interval: "5s"
@@ -91,9 +85,6 @@ prometheus:
           - target_label: service
             replacement: cloud-lab-api
 
-    # Load your existing recording rules and alert rules
-    additionalRulesForClusterRole: []
-
 # ── Alertmanager ──────────────────────────────────────────────────────────────
 alertmanager:
   enabled: true
@@ -103,21 +94,20 @@ alertmanager:
     nodePort: 32093
 
   alertmanagerSpec:
-    # We'll mount our existing alertmanager config via a secret
     useExistingSecret: true
     configSecret: alertmanager-config
 
 # ── kube-state-metrics ────────────────────────────────────────────────────────
-# Exposes K8s object state as metrics — pod restarts, deployment replicas, etc.
 kubeStateMetrics:
   enabled: true
 
 # ── node-exporter ─────────────────────────────────────────────────────────────
-# Exposes host-level metrics — CPU, memory, disk, network
+# DISABLED — WSL2 does not support the host path mount node-exporter requires
+# Enable this when deploying to a real Linux node or cloud cluster
 nodeExporter:
-  enabled: true
+  enabled: false
 
-# ── Default scraping of K8s components ───────────────────────────────────────
+# ── K8s component scraping ────────────────────────────────────────────────────
 kubeApiServer:
   enabled: true
 
@@ -125,13 +115,19 @@ kubelet:
   enabled: true
 
 kubeControllerManager:
-  enabled: false   # not accessible in k3s
+  enabled: false
 
 kubeScheduler:
-  enabled: false   # not accessible in k3s
+  enabled: false
 
 kubeProxy:
-  enabled: false   # not accessible in k3s
+  enabled: false
 
 kubeEtcd:
-  enabled: false   # not accessible in k3s
+  enabled: false
+
+
+# Disable sidecar datasource discovery — prevents duplicate default datasource conflict
+  sidecar:
+    datasources:
+      enabled: false
