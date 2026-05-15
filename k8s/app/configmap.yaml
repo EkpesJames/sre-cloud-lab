@@ -4,9 +4,19 @@ metadata:
   name: cloud-lab-config
   namespace: app
 data:
+  # ── App behaviour ───────────────────────────────────────────────────────────
   APP_ERROR_RATE: "0.30"
   APP_LATENCY_SECONDS: "0.2"
+
+  # ── Jaeger tracing ──────────────────────────────────────────────────────────
+  # Points to the Jaeger service in the monitoring namespace
+  JAEGER_ENDPOINT: "http://jaeger.monitoring.svc.cluster.local:4317"
+
+  # ── Circuit breaker ─────────────────────────────────────────────────────────
+  CIRCUIT_THRESHOLD: "0.50"   # open when 50% of requests fail
+  CIRCUIT_TIMEOUT: "30"       # seconds before trying half-open
+
+  # ── SMTP ────────────────────────────────────────────────────────────────────
   SMTP_HOST: "smtp.mail.yahoo.com"
   SMTP_PORT: "587"
   SLACK_CHANNEL: "#general"
-

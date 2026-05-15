@@ -1,3 +1,13 @@
 fastapi
 uvicorn
 prometheus-client
+
+# Retry with exponential backoff
+tenacity
+
+# OpenTelemetry — distributed tracing
+opentelemetry-sdk
+opentelemetry-api
+opentelemetry-instrumentation-fastapi
+opentelemetry-exporter-otlp-proto-grpc
+opentelemetry-instrumentation-logging
