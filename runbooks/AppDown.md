@@ -3,15 +3,16 @@
 **Alert:** `AppDown`
 **Severity:** Critical
 **Team:** Platform
-**Last reviewed:** 2025-05
+**Last reviewed:** 2026-05
+**Prometheus expression:** `up{service="cloud-lab-api"} == 0`
 
 ---
 
 ## What this alert means
 
-The Prometheus target `cloud-app` is returning `up == 0`, meaning Prometheus cannot scrape the application's `/metrics` endpoint. The application is either crashed, unreachable on the network, or the container has stopped.
-
-This directly breaches the availability SLO. Every second this alert is firing, error budget is being consumed.
+Prometheus cannot scrape the `/metrics` endpoint on one or more `cloud-lab` pods.
+The pod is either crashed, failing its readiness probe, or has been evicted by
+Kubernetes. Every second this fires, error budget is consumed at maximum rate.
 
 ---
 
@@ -21,8 +22,8 @@ This directly breaches the availability SLO. Every second this alert is firing, 
 |---|---|
 | Availability SLO | Actively breaching — 99% target |
 | Error budget | Burning at maximum rate |
-| Users | All requests failing |
-| Downstream | Any service depending on cloud-lab API is affected |
+| Users | Requests failing or being routed to remaining healthy pods |
+| Circuit breaker | May trip open if error rate exceeds 50% on surviving pods |
 
 ---
 
@@ -33,100 +34,164 @@ Work through these in order. Stop when you find the cause.
 ### Step 1 — Confirm the alert is real
 
 ```bash
-curl -v http://localhost:8080/
-curl -v http://localhost:8080/metrics
+# Check if the app responds at all
+curl -v http://localhost:8888/health/live
+curl -v http://localhost:8888/health/ready
+
+# Check circuit breaker state
+curl http://localhost:8888/health/circuit
 ```
 
-If either responds, the app is up and Prometheus has a scrape issue, not an app issue. Go to Step 5.
+If liveness returns 200 but readiness returns 503 — the app is alive but not
+ready. Check the readiness reason (dependency or circuit breaker). Go to Step 4.
 
-If both fail, the app is genuinely down. Continue to Step 2.
+If both fail — the pod is genuinely down. Continue to Step 2.
 
 ---
 
-### Step 2 — Check container state
+### Step 2 — Check pod state in Kubernetes
 
 ```bash
-docker ps -a --filter "name=cloud-app"
+# See all app pods and their status
+kubectl get pods -n app -o wide
+
+# Watch for changes in real time
+kubectl get pods -n app -w
 ```
 
-**Container is running** → app process crashed inside the container. Go to Step 3.
-
-**Container is stopped/exited** → container stopped unexpectedly. Go to Step 4.
-
-**Container not listed** → container was never started or was removed. Run `./lab up` and monitor.
+| Pod status | Meaning | Next step |
+|---|---|---|
+| `Running` but not ready | Readiness probe failing | Step 4 |
+| `CrashLoopBackOff` | App crashing repeatedly | Step 3 |
+| `OOMKilled` | Out of memory | Step 5 |
+| `Pending` | Can't be scheduled | Step 6 |
+| `Terminating` | Pod being removed | Wait and observe |
 
 ---
 
-### Step 3 — App crashed inside running container
+### Step 3 — App crashing (CrashLoopBackOff)
 
 ```bash
-docker logs cloud-app --tail 50
+# Get logs from the crashing pod
+kubectl logs -n app <pod-name> --previous --tail=50
+
+# Get logs from currently running container
+kubectl logs -n app <pod-name> --tail=50
+
+# Get full pod details including events
+kubectl describe pod -n app <pod-name>
 ```
 
-Look for Python tracebacks, port binding errors, or OOM messages.
+Look for: Python tracebacks, port binding errors, missing environment variables,
+failed imports.
 
+Check if a recent deployment caused it:
 ```bash
-docker exec cloud-app ps aux
+kubectl rollout history deployment/cloud-lab -n app
 ```
 
-If uvicorn process is missing, restart:
-
+Roll back if needed:
 ```bash
-docker restart cloud-app
+kubectl rollout undo deployment/cloud-lab -n app
+kubectl rollout status deployment/cloud-lab -n app
 ```
-
-Monitor for 60 seconds. If it crashes again, check logs for the root cause before restarting again.
 
 ---
 
-### Step 4 — Container stopped or exited
+### Step 4 — Readiness probe failing
 
 ```bash
-docker logs cloud-app --tail 50
+# Check readiness response directly
+curl http://localhost:8888/health/ready
+
+# Check circuit breaker state
+curl http://localhost:8888/health/circuit
 ```
 
-Check exit code:
-
+**If circuit breaker is open:**
+The error rate exceeded 50%. Wait 30 seconds for half-open state. If it
+doesn't recover automatically, check the underlying error source:
 ```bash
-docker inspect cloud-app --format='{{.State.ExitCode}}'
+# Check error rate in Prometheus
+# Query: slo:error_rate_5m
+kubectl port-forward -n monitoring \
+  svc/kube-prometheus-kube-prome-prometheus 9090:9090 &
 ```
 
-| Exit code | Meaning |
-|---|---|
-| 0 | Clean shutdown (unexpected in lab) |
-| 1 | App error / Python exception |
-| 137 | OOM kill — container ran out of memory |
-| 143 | SIGTERM — container was stopped externally |
-
-Restart the container:
-
+**If dependency is unhealthy:**
 ```bash
-./lab recover
+# Restore the dependency (lab simulation)
+curl http://localhost:8888/health/dependency/restore
 ```
-
-If exit code was 137, the container needs a memory limit increase in the `lab` script.
 
 ---
 
-### Step 5 — Network or scrape issue
-
-If the app responds but Prometheus shows `up == 0`:
+### Step 5 — OOMKilled (out of memory)
 
 ```bash
-# Check Prometheus targets page
-curl http://localhost:9090/api/v1/targets | python3 -m json.tool | grep -A5 "cloud-lab"
+kubectl describe pod -n app <pod-name> | grep -A5 "OOMKilled"
+
+# Check current memory usage across pods
+kubectl top pods -n app
 ```
 
-Check Docker network:
-
+Temporary fix — restart the pod:
 ```bash
-docker network inspect cloud-lab-net
+kubectl delete pod -n app <pod-name>
 ```
 
-Confirm cloud-app is attached to the network. If not:
+Permanent fix — increase memory limit in `k8s/app/deployment.yaml`:
+```yaml
+resources:
+  limits:
+    memory: "256Mi"   # increase from 128Mi
+```
+
+Then apply:
+```bash
+kubectl apply -f k8s/app/deployment.yaml
+kubectl rollout status deployment/cloud-lab -n app
+```
+
+---
+
+### Step 6 — Pod stuck in Pending
 
 ```bash
-docker network connect cloud-lab-net cloud-app
+kubectl describe pod -n app <pod-name> | grep -A10 "Events:"
+```
+
+Common causes:
+- Insufficient CPU/memory on node
+- Node not ready
+- Image pull failure
+
+Check node status:
+```bash
+kubectl get nodes
+kubectl describe node <node-name> | grep -A10 "Conditions:"
+```
+
+---
+
+### Step 7 — Prometheus scrape issue (app up but alert firing)
+
+If the app responds but Prometheus still shows `up == 0`:
+
+```bash
+# Check Prometheus targets
+curl -s http://localhost:9090/api/v1/targets | \
+  python3 -m json.tool | grep -A10 "cloud-lab-app"
+
+# Check pod annotations are correct
+kubectl get pod -n app <pod-name> -o yaml | grep -A5 "annotations"
+```
+
+Pod must have these annotations for Prometheus service discovery:
+```yaml
+prometheus.io/scrape: "true"
+prometheus.io/port: "80"
+prometheus.io/path: "/metrics"
 ```
 
 ---
@@ -134,37 +199,44 @@ docker network connect cloud-lab-net cloud-app
 ## Recovery steps
 
 ```bash
-# Standard recovery
-./lab recover
+# Scale up if replicas dropped to zero
+kubectl scale deployment cloud-lab -n app --replicas=2
 
-# If recovery fails, full restart
-./lab down && ./lab up
+# Force restart all pods
+kubectl rollout restart deployment/cloud-lab -n app
 
-# Confirm recovery
-./lab status
+# Watch recovery
+kubectl rollout status deployment/cloud-lab -n app
+
+# Verify health
+curl http://localhost:8888/health/live
+curl http://localhost:8888/health/ready
+curl http://localhost:8888/health/circuit
 ```
-
-After recovery, confirm in Prometheus that `up == 1` for the `cloud-lab` job before closing the incident.
 
 ---
 
 ## Post-incident checklist
 
-- [ ] App is responding to requests (`curl http://localhost:8080/`)
-- [ ] Prometheus shows `up == 1` for `cloud-lab` target
-- [ ] Alert has resolved in Alertmanager
-- [ ] Grafana availability panel is back to green
-- [ ] Error budget panel shows burn rate returning to normal
+- [ ] All pods show `Running` and `1/1 Ready`
+- [ ] `curl http://localhost:8888/health/live` returns 200
+- [ ] `curl http://localhost:8888/health/ready` returns 200
+- [ ] Circuit breaker state is `closed`
+- [ ] Prometheus shows `up{service="cloud-lab-api"} == 1` for all pods
+- [ ] AppDown alert resolved in Alertmanager (`http://localhost:9093`)
+- [ ] Grafana availability panel returning to green
+- [ ] Error budget burn rate returning to normal
+- [ ] Slack resolved notification received
 
 ---
 
 ## Escalation
 
-This is a lab environment. In a production context, escalation would go to:
-
-1. On-call SRE (immediate)
-2. Platform team lead (if not resolved within 15 minutes)
-3. Service owner (if root cause is application code)
+| Time elapsed | Action |
+|---|---|
+| 0–5 minutes | Follow this runbook |
+| 5–15 minutes | Escalate to platform team lead |
+| 15+ minutes | Escalate to service owner, consider rollback |
 
 ---
 
@@ -172,6 +244,7 @@ This is a lab environment. In a production context, escalation would go to:
 
 - Outage lasted more than 5 minutes
 - Root cause was not immediately obvious
-- A configuration change preceded the outage
+- A code or configuration change preceded the outage
+- The PodDisruptionBudget was violated
 
-Use the postmortem template at `docs/postmortem-template.md`.
+Use the template at `docs/postmortem-template.md`.
