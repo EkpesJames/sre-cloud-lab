@@ -36,7 +36,7 @@ jobs:
 
       - name: Lint with ruff
         run: ruff check app/main.py --select E,F,W --ignore E501
-        continue-on-error: true   # lint warnings don't block — errors do
+        continue-on-error: true
 
       - name: Run tests
         run: pytest tests/ -v --tb=short
@@ -50,13 +50,15 @@ jobs:
         if: always()
         with:
           name: test-results
-          path: .pytest_cache/
+          path: |
+            tests/
+          if-no-files-found: warn
 
   # ── Job 2: Build & Scan ──────────────────────────────────────────────────────
   build:
     name: Build & Security Scan
     runs-on: ubuntu-latest
-    needs: test   # only runs if tests pass
+    needs: test
 
     outputs:
       image-tag: ${{ steps.meta.outputs.tags }}
@@ -76,47 +78,49 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # ── Force image name to lowercase — GHCR requirement ──────────────────
+      - name: Set lowercase image name
+        id: image
+        run: |
+          echo "name=$(echo '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
       - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ steps.image.outputs.name }}
           tags: |
-            # Tag with git SHA for traceability — every image is unique
             type=sha,prefix=sha-,format=short
-            # Tag latest on main branch only
             type=raw,value=latest,enable={{is_default_branch}}
-            # Tag with branch name on PRs
             type=ref,event=branch
 
-      - name: Build Docker image (no push yet — scan first)
+      - name: Build Docker image for scanning
         uses: docker/build-push-action@v5
-        id: build-local
         with:
           context: .
           file: docker/Dockerfile
           push: false
           load: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:scan-target
+          tags: ${{ steps.image.outputs.name }}:scan-target
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:scan-target
+          image-ref: ${{ steps.image.outputs.name }}:scan-target
           format: table
-          exit-code: 1           # fail pipeline on CRITICAL CVEs
-          severity: CRITICAL     # only block on critical — warn on HIGH
-          ignore-unfixed: true   # don't fail on vulns with no fix available
+          exit-code: 1
+          severity: CRITICAL
+          ignore-unfixed: true
 
-      - name: Build and push image (scan passed)
+      - name: Build and push image
         uses: docker/build-push-action@v5
         id: build
         with:
           context: .
           file: docker/Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}  # don't push on PRs
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -124,23 +128,24 @@ jobs:
 
       - name: Output image details
         run: |
-          echo "Image tags: ${{ steps.meta.outputs.tags }}"
-          echo "Image digest: ${{ steps.build.outputs.digest }}"
+          echo "Image: ${{ steps.image.outputs.name }}"
+          echo "Tags: ${{ steps.meta.outputs.tags }}"
 
-  # ── Job 3: Deploy ────────────────────────────────────────────────────────────
-  # Only runs on push to main (not PRs) after build succeeds
-  # NOTE: This job requires a self-hosted runner on your WSL2 machine
-  # to have kubectl access to your k3s cluster.
-  # See README for setup instructions.
+  # ── Job 3: Deploy ─────────────────────────────────────────────────────────
   deploy:
     name: Deploy to k3s
-    runs-on: self-hosted    # runs on your WSL2 machine
+    runs-on: self-hosted
     needs: build
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Set lowercase image name
+        id: image
+        run: |
+          echo "name=$(echo '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
       - name: Set image tag
         id: tag
@@ -149,7 +154,7 @@ jobs:
       - name: Update deployment image
         run: |
           kubectl set image deployment/cloud-lab \
-            cloud-lab=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.SHA_TAG }} \
+            cloud-lab=${{ steps.image.outputs.name }}:${{ steps.tag.outputs.SHA_TAG }} \
             -n app
 
       - name: Wait for rollout
@@ -160,12 +165,10 @@ jobs:
 
       - name: Verify deployment health
         run: |
-          # Wait for pods to pass readiness probe
           kubectl wait --for=condition=ready pod \
             -l app=cloud-lab \
             -n app \
             --timeout=60s
-
           echo "Deployment successful"
           kubectl get pods -n app
 
@@ -175,7 +178,7 @@ jobs:
           curl -s -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
             -d "{
-              \"text\": \"✅ Deployment successful\",
+              \"text\": \"✅ Deployment successful — ${{ github.sha }}\",
               \"attachments\": [{
                 \"color\": \"good\",
                 \"fields\": [
