@@ -76,7 +76,7 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.PAT_TOKEN }}
 
       # ── Force image name to lowercase — GHCR requirement ──────────────────
       - name: Set lowercase image name
