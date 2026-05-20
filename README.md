@@ -74,7 +74,7 @@ and practices used by SRE teams at scale.
 
 ---
 
-## Tech stack
+## Tech stack used
 
 | Layer | Tool |
 |---|---|
