@@ -155,7 +155,7 @@ jobs:
         run: |
           sudo k3s ctr images pull \
             --user ${{ github.actor }}:${{ secrets.PAT_TOKEN }} \
-            ${{ steps.image.outputs.name }}:${{ steps.tag.outputs.SHA_TAG }}
+            ${{ steps.image.outputs.name }}:${{ steps.tag.outputs.SHA_TAG }} || true
 
       - name: Update deployment image
         run: |
