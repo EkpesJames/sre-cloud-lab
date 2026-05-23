@@ -151,6 +151,12 @@ jobs:
         id: tag
         run: echo "SHA_TAG=sha-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
+      - name: Pull image into k3s containerd
+        run: |
+          sudo k3s ctr images pull \
+            --user ${{ github.actor }}:${{ secrets.PAT_TOKEN }} \
+            ${{ steps.image.outputs.name }}:${{ steps.tag.outputs.SHA_TAG }}
+
       - name: Update deployment image
         run: |
           kubectl set image deployment/cloud-lab \
