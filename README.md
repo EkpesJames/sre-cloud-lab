@@ -1,318 +1,214 @@
 # Cloud SRE Lab
 
-A production-grade Site Reliability Engineering portfolio project demonstrating
-end-to-end SRE practices — from SLO definition and error budget tracking through
-to Kubernetes deployment, distributed tracing, chaos engineering, and a full
-CI/CD pipeline.
+A production-grade SRE portfolio project running on Kubernetes (k3s on WSL2).
+Demonstrates the full SRE toolkit — observability, alerting, chaos engineering,
+CI/CD, and resilience patterns.
 
-Built on WSL2 using k3s, this lab runs entirely locally and mirrors the tooling
-and practices used by SRE teams at scale.
+**Repo:** https://github.com/EkpesJames/sre-cloud-lab
+**Stack:** Python · FastAPI · Kubernetes · Prometheus · Grafana · Loki · Jaeger · Chaos Mesh · GitHub Actions
 
 ---
 
-## Architecture
+## Quick start
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        GitHub Actions CI/CD                      │
-│          lint → test → build → scan (Trivy) → push → deploy     │
-└───────────────────────────┬─────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    k3s Kubernetes Cluster (WSL2)                  │
-│                                                                   │
-│  ┌─────────────────────────────────┐                             │
-│  │         app namespace           │                             │
-│  │                                 │                             │
-│  │  ┌──────────┐  ┌──────────┐    │                             │
-│  │  │ cloud-lab│  │ cloud-lab│    │  ← 2–6 replicas (HPA)      │
-│  │  │  pod 1   │  │  pod 2   │    │                             │
-│  │  └──────────┘  └──────────┘    │                             │
-│  │   FastAPI + OpenTelemetry       │                             │
-│  │   Circuit breaker + Retry       │                             │
-│  │   /health/live + /health/ready  │                             │
-│  └─────────────┬───────────────────┘                             │
-│                │ metrics + traces + logs                         │
-│                ▼                                                 │
-│  ┌─────────────────────────────────┐                             │
-│  │      monitoring namespace       │                             │
-│  │                                 │                             │
-│  │  Prometheus  → recording rules  │                             │
-│  │  Alertmanager→ Slack + email    │                             │
-│  │  Grafana     → SRE dashboard    │                             │
-│  │  Loki        → log aggregation  │                             │
-│  │  Jaeger      → distributed traces│                            │
-│  │  kube-state-metrics             │                             │
-│  └─────────────────────────────────┘                             │
-└─────────────────────────────────────────────────────────────────┘
+```bash
+# 1. Clone the repo
+git clone https://github.com/EkpesJames/sre-cloud-lab.git
+cd sre-cloud-lab
+
+# 2. Copy and fill in credentials
+cp .env.example .env
+nano .env
+
+# 3. Start everything
+./sre-lab.sh start
+
+# 4. Open in browser
+# App          → http://localhost:8888
+# Grafana      → http://localhost:3000  (admin/admin)
+# Prometheus   → http://localhost:9090
+# Alertmanager → http://localhost:9093
+# Jaeger       → http://localhost:16686
 ```
 
 ---
 
-## What this project demonstrates
+## Prerequisites
 
-| SRE Practice | Implementation |
+| Tool | Install |
 |---|---|
-| SLO definition | 99% availability, p95 < 500ms — documented in `docs/SLO.md` |
-| Error budget tracking | Prometheus recording rules + burn rate alerts |
-| Multi-window burn rate alerting | 1h fast burn (14.4x) + 6h slow burn (6x) |
-| Observability — metrics | Prometheus + Grafana, 9-panel SRE dashboard |
-| Observability — logs | Loki + Promtail, structured JSON logging |
-| Observability — traces | OpenTelemetry + Jaeger, trace ID in every response |
-| Kubernetes deployment | Deployment, Service, HPA, PDB, ConfigMap, Secrets |
-| Health probes | Liveness, readiness, and startup probes |
-| Security hardening | Non-root container, read-only filesystem, K8s Secrets |
-| Circuit breaker | Opens at 50% error rate, half-open after 30s |
-| Retry with backoff | Tenacity — 3 attempts, exponential backoff 1s/2s/4s |
-| Graceful shutdown | SIGTERM handling — zero dropped requests on rolling update |
-| Chaos engineering | Pod kill, network delay, CPU stress scenarios |
-| CI/CD pipeline | GitHub Actions — test, build, Trivy scan, push, deploy |
-| Runbooks | AppDown, HighLatency, HighErrorRate — full diagnosis steps |
-| Postmortem practice | Template + completed postmortems from chaos runs |
-| Production Readiness Review | `docs/PRR.md` — pre-launch checklist |
-
----
-
-## Tech stack used
-
-| Layer | Tool |
-|---|---|
-| Application | Python, FastAPI, Uvicorn |
-| Tracing | OpenTelemetry SDK, Jaeger |
-| Resilience | Tenacity (circuit breaker + retry) |
-| Metrics | Prometheus, prometheus-client |
-| Dashboards | Grafana (dashboard as code) |
-| Log aggregation | Loki, Promtail |
-| Alerting | Alertmanager → Slack + email |
-| Container runtime | Docker, containerd |
-| Orchestration | Kubernetes (k3s on WSL2) |
-| Package management | Helm |
-| CI/CD | GitHub Actions, GHCR |
-| Security scanning | Trivy |
+| WSL2 (Ubuntu 24.04) | Windows feature |
+| Docker | `sudo apt install docker.io` |
+| k3s | `curl -sfL https://get.k3s.io \| sh -` |
+| Helm | `curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \| bash` |
+| kubectl | Included with k3s — copy kubeconfig: `sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config` |
 
 ---
 
 ## Project structure
 
 ```
-cloud-sre-lab/
+sre-cloud-lab/
+├── sre-lab.sh                  # Master control script
+├── generate-traffic.sh         # Traffic simulation
+├── secrets-audit.sh            # Secrets verification
+├── capacity-baseline.sh        # Load testing
+├── install-chaos-mesh.sh       # Chaos Mesh setup
 ├── app/
-│   ├── main.py                  # FastAPI app — metrics, tracing, circuit breaker
+│   ├── main.py                 # FastAPI app
 │   └── requirements.txt
 ├── docker/
-│   └── Dockerfile               # Non-root, read-only filesystem, health check
+│   └── Dockerfile
 ├── k8s/
-│   ├── namespaces/
-│   │   └── namespaces.yaml      # app + monitoring namespaces
-│   ├── app/
-│   │   ├── deployment.yaml      # 3 replicas, probes, resource limits, security
-│   │   ├── service.yaml         # ClusterIP + NodePort
-│   │   ├── configmap.yaml       # App config — error rate, latency, Jaeger endpoint
-│   │   ├── hpa.yaml             # HPA — 2 to 6 replicas on CPU
-│   │   ├── pdb.yaml             # PodDisruptionBudget — min 2 available
-│   │   └── secret.template.yaml # Secret structure reference
-│   └── monitoring/
-│       ├── kube-prometheus-stack-values.yaml
-│       ├── loki-stack-values.yaml
-│       ├── prometheus-rules.yaml  # PrometheusRule CRD — alerts + recording rules
-│       └── jaeger.yaml
+│   ├── namespaces/             # K8s namespace definitions
+│   ├── app/                    # App manifests (deployment, service, hpa, pdb)
+│   └── monitoring/             # Helm values + PrometheusRule
 ├── monitoring/
-│   ├── prometheus.yml           # Scrape config (Docker mode)
-│   ├── alerts.yml               # Alert rules
-│   ├── recording_rules.yml      # SLI + error budget recording rules
-│   └── alertmanager.yml         # Routing — Slack (critical) + email (warning)
+│   ├── prometheus.yml          # Scrape config
+│   ├── alerts.yml              # Alert rules
+│   ├── recording_rules.yml     # SLI + error budget rules
+│   └── alertmanager.yml        # Alert routing
 ├── grafana/
-│   ├── dashboards/
-│   │   └── sre-overview.json    # 9-panel SRE dashboard as code
-│   └── provisioning/
-│       ├── datasources.yml
-│       └── dashboards.yml
-├── nginx/
-│   └── nginx.conf               # Load balancer config (Docker mode)
-├── chaos/                       # Chaos Mesh manifests (Week 5)
-├── runbooks/
-│   ├── AppDown.md
-│   ├── HighLatency.md
-│   └── HighErrorRate.md
+│   ├── dashboards/             # Dashboard JSON (as code)
+│   └── provisioning/           # Auto-load config
+├── chaos/                      # Chaos Mesh scenarios
+├── tests/                      # pytest test suite
+├── runbooks/                   # Incident response guides
 ├── docs/
-│   ├── SLO.md                   # SLO definitions + error budget policy
-│   ├── postmortem-template.md
-│   └── PRR.md                   # Production Readiness Review
-├── .github/
-│   └── workflows/
-│       └── ci.yml               # GitHub Actions CI/CD pipeline
-├── generate-traffic.sh          # 6 traffic profiles for testing
-├── startup.sh                   # Start k3s + all port-forwards
-├── shutdown.sh                  # Clean shutdown
-├── lab                          # Docker mode control script
-├── .env.example                 # Environment variable template
-└── .gitignore
+│   ├── SLO.md                  # SLO definitions
+│   ├── PRR.md                  # Production Readiness Review
+│   ├── postmortem-*.md         # Completed postmortems
+│   └── adr/                    # Architecture Decision Records
+└── .github/workflows/ci.yml    # CI/CD pipeline
 ```
 
 ---
 
-## Quick start
+## The application
 
-### Prerequisites
-- WSL2 (Ubuntu 24.04)
-- Docker
-- k3s (`curl -sfL https://get.k3s.io | sh -`)
-- Helm 3 (`curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash`)
+A FastAPI Python app that simulates a production microservice:
 
-### 1. Clone and configure
+- **30% random error rate** — drives realistic SLO breach scenarios
+- **200ms processing delay** — creates measurable latency
+- **Circuit breaker** — opens at 50% errors, closes after 30s
+- **Retry with backoff** — 3 attempts, 1s/2s/4s delays
+- **Graceful shutdown** — drains in-flight requests on SIGTERM
+- **OpenTelemetry tracing** — trace ID on every request
+- **Structured JSON logging** — timestamp, level, trace_id, duration
 
-```bash
-git clone https://github.com/YOUR_USERNAME/cloud-sre-lab.git
-cd cloud-sre-lab
+### Endpoints
 
-# Copy and fill in credentials
-cp .env.example .env
-nano .env
-```
+| Endpoint | Purpose |
+|---|---|
+| `GET /` | Main endpoint — 30% fail rate, 200ms delay |
+| `GET /health/live` | Liveness probe — always 200 if process is alive |
+| `GET /health/ready` | Readiness probe — 503 if circuit open or dependency down |
+| `GET /health/circuit` | Circuit breaker state and counters |
+| `GET /metrics` | Prometheus metrics |
+| `GET /health/dependency/break` | Lab — simulate dependency failure |
+| `GET /health/dependency/restore` | Lab — restore dependency |
 
-### 2. Deploy to Kubernetes
+---
 
-```bash
-# Deploy app
-bash k8s/k8s-apply.sh
+## Master control script
 
-# Deploy observability stack
-bash week2-deploy.sh
-
-# Deploy tracing + resilience
-bash week3-deploy.sh
-```
-
-### 3. Start the lab
+All lab operations go through `./sre-lab.sh`:
 
 ```bash
-./startup.sh
-```
+# Lifecycle
+./sre-lab.sh start              # Start k3s + all port-forwards
+./sre-lab.sh stop               # Stop everything cleanly
+./sre-lab.sh restart            # Stop then start
+./sre-lab.sh status             # Health check all endpoints + pods
 
-### 4. Access the tools
+# Operations
+./sre-lab.sh deploy             # Build + deploy app to Kubernetes
+./sre-lab.sh logs [target]      # Tail logs (app|prometheus|grafana|alertmanager|jaeger)
+./sre-lab.sh traffic [mode]     # Generate traffic
+./sre-lab.sh chaos [type]       # Run chaos scenario
+./sre-lab.sh outage             # Scale app to 0 replicas
+./sre-lab.sh recover            # Restore app after outage
 
-| Tool | URL | Credentials |
-|---|---|---|
-| App | http://localhost:8888 | — |
-| Prometheus | http://localhost:9090 | — |
-| Grafana | http://localhost:3000 | admin / admin |
-| Alertmanager | http://localhost:9093 | — |
-| Jaeger | http://localhost:16686 | — |
-
-### 5. Generate traffic
-
-```bash
-# Six profiles available
-./generate-traffic.sh mixed        # randomised realistic traffic
-./generate-traffic.sh spike        # sudden traffic spike
-./generate-traffic.sh error-flood  # drive up error rate
-./generate-traffic.sh slow-burn    # sustained load
-./generate-traffic.sh slo-breach   # trigger SLO breach scenario
-./generate-traffic.sh normal       # steady baseline
-```
-
-### 6. Shut down
-
-```bash
-./shutdown.sh
+# Utilities
+./sre-lab.sh secrets            # Run secrets audit
+./sre-lab.sh open               # Print all access URLs
 ```
 
 ---
 
 ## SLOs
 
-| SLO | Target | Alert threshold |
+| SLO | Target | Alert |
 |---|---|---|
-| Availability | 99.0% success rate (30-day rolling) | Warning > 5% errors, Critical > 10% errors |
-| Latency | p95 < 500ms | Warning > 500ms, Critical > 1000ms |
+| Availability | 99% success rate (30-day rolling) | Warning >5% errors, Critical >10% errors |
+| Latency | p95 < 500ms | Warning >500ms, Critical >1000ms |
 
-Error budget: 1% of requests per month may fail (~7h 18m equivalent).
+**Error budget:** 1% of requests per month (~7h 18m equivalent)
 
-See `docs/SLO.md` for full definition, burn rate policy, and review process.
-
----
-
-## Observability
-
-### Metrics — Prometheus + Grafana
-Key recording rules:
-- `slo:success_rate_5m` — aggregated availability across all pods
-- `slo:latency_p95_5m` — p95 latency across all pods
-- `slo:error_budget_burn_rate_1h` — fast burn rate (critical threshold: 14.4x)
-- `slo:error_budget_burn_rate_6h` — slow burn rate (warning threshold: 6x)
-
-### Logs — Loki + Promtail
-Structured JSON logs from all pods. Correlate with metrics in Grafana using trace ID.
-
-### Traces — OpenTelemetry + Jaeger
-Every request carries a trace ID returned in the response body and written to logs.
-Search traces in Jaeger at `http://localhost:16686`.
+Full definition: `docs/SLO.md`
 
 ---
 
-## Resilience patterns
+## Alerts
 
-### Circuit breaker
-- Opens when error rate exceeds 50% over 10+ requests
-- Returns HTTP 503 immediately when open — no wasted capacity
-- Enters half-open state after 30 seconds
-- Closes on first successful trial request
-- State visible at `/health/circuit` and in Prometheus as `circuit_breaker_state`
-
-**Known behaviour:** Each pod maintains its own circuit breaker state.
-In production, shared state (e.g. Redis) would synchronise across instances.
-
-### Retry with exponential backoff
-- Max 3 attempts on dependency calls
-- Backoff: 1s → 2s → 4s
-- Implemented with Tenacity
-
-### Graceful shutdown
-- Handles SIGTERM via FastAPI lifespan event
-- Drains in-flight requests before exiting
-- Prevents dropped requests during Kubernetes rolling updates
+| Alert | Condition | Severity | Notification |
+|---|---|---|---|
+| AppDown | App unreachable | Critical | Slack |
+| HighLatencyWarning | p95 > 500ms for 1m | Warning | Email |
+| HighLatencyCritical | p95 > 1000ms for 2m | Critical | Slack |
+| HighErrorRateWarning | Error rate > 5% for 1m | Warning | Email |
+| HighErrorRateCritical | Error rate > 10% for 2m | Critical | Slack |
+| ErrorBudgetBurnRateFast | Burn rate > 14.4x (1h) | Critical | Slack |
+| ErrorBudgetBurnRateSlow | Burn rate > 6x (6h) | Warning | Email |
 
 ---
 
-## Health endpoints
+## CI/CD pipeline
 
-| Endpoint | Purpose | K8s probe |
+Every push to `main` triggers:
+
+```
+Test (ubuntu-latest)
+  └── pip install → ruff lint → 30 pytest tests
+
+Build (ubuntu-latest, needs: test)
+  └── docker build → Trivy CVE scan → push to GHCR
+
+Deploy (self-hosted WSL2, needs: build)
+  └── k3s pull → kubectl set image → rollout status → Slack notify
+```
+
+**GitHub Secrets required:**
+- `PAT_TOKEN` — GitHub Personal Access Token (repo + write:packages)
+- `SLACK_WEBHOOK_URL` — Slack incoming webhook URL
+
+---
+
+## Known WSL2 limitations
+
+| Issue | Cause | Impact |
 |---|---|---|
-| `/health/live` | Is the process alive? | Liveness |
-| `/health/ready` | Is the app ready to serve? | Readiness |
-| `/health/circuit` | Circuit breaker state | — |
-| `/metrics` | Prometheus metrics | — |
+| node-exporter disabled | Host path mount restriction | No host CPU/memory metrics |
+| NodePort not directly accessible | WSL2 network namespace | Use kubectl port-forward |
+| Per-pod circuit breaker state | No shared cache | Each pod tracks independently |
+| KubeAPIErrorBudgetBurn alert firing | Resource constraints | Routed to null receiver |
 
 ---
 
 ## Runbooks
 
-| Alert | Runbook | Severity |
-|---|---|---|
-| AppDown | `runbooks/AppDown.md` | Critical |
-| HighLatencyWarning / Critical | `runbooks/HighLatency.md` | Warning / Critical |
-| HighErrorRateWarning / Critical | `runbooks/HighErrorRate.md` | Warning / Critical |
-| ErrorBudgetBurnRateFast | `runbooks/ErrorBudget.md` | Critical |
+| Alert | Runbook |
+|---|---|
+| AppDown | `runbooks/AppDown.md` |
+| HighLatency | `runbooks/HighLatency.md` |
+| HighErrorRate | `runbooks/HighErrorRate.md` |
 
 ---
 
-## Known limitations (WSL2)
+## Architecture decisions
 
-| Limitation | Reason | Production equivalent |
-|---|---|---|
-| node-exporter disabled | WSL2 host path mount restriction | Enable on real Linux nodes |
-| Per-pod circuit breaker state | No shared cache | Redis or distributed state store |
-| In-memory trace storage (Jaeger) | Resets on pod restart | Jaeger with persistent backend |
-| NodePort not accessible directly | WSL2 network namespace | LoadBalancer or Ingress on cloud |
-
----
-
-## What I would add next
-
-- Terraform for cloud deployment (AWS EKS or Azure AKS)
-- Sealed Secrets for encrypted secrets in git
-- Chaos Mesh for Kubernetes-native fault injection
-- Multi-service SLO dashboard (premium vs standard tier)
-- Grafana OnCall for on-call rotation simulation
-- Rate limiting with SlowAPI
+| Decision | Document |
+|---|---|
+| Why k3s over minikube | `docs/adr/ADR-001-k3s-over-minikube.md` |
+| Why multi-window burn rate alerting | `docs/adr/ADR-002-burn-rate-alerting.md` |
+| Why Loki over Elasticsearch | `docs/adr/ADR-003-loki-over-elasticsearch.md` |
