@@ -35,7 +35,7 @@ jobs:
           pip install pytest pytest-asyncio httpx ruff
 
       - name: Lint with ruff
-        run: ruff check app/main.py --select E,F,W --ignore E501
+        run: ruff check api-gateway/gateway.py --select E,F,W --ignore E501
         continue-on-error: true
 
       - name: Run tests
@@ -44,6 +44,7 @@ jobs:
           APP_ERROR_RATE: "0.0"
           APP_LATENCY_SECONDS: "0.0"
           JAEGER_ENDPOINT: "http://localhost:4317"
+          PYTHONPATH: "api-gateway"
 
       - name: Upload test results
         uses: actions/upload-artifact@v4

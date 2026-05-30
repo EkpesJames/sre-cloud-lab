@@ -15,8 +15,8 @@ with patch.dict(os.environ, {
     'APP_LATENCY_SECONDS': '0.0',
     'JAEGER_ENDPOINT': 'http://localhost:4317',
 }):
-    import main as app_module
-    from main import app, circuit_breaker, CircuitBreaker
+    import gateway as app_module
+    from gateway import app, circuit_breaker, CircuitBreaker
 
 client = TestClient(app)
 
