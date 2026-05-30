@@ -1,597 +1,329 @@
-# Tool Guide
+# Tool Guide — Distributed Booking System
 
-Plain-English reference for every tool in the lab — what it does, how to use
-it, how to test it, and what a healthy result looks like.
+Reference for every tool and service — what it does, how to use it,
+how to test it, and what a healthy result looks like.
 
 ---
 
 ## sre-lab.sh — Master control script
 
-**What it is:** Single script that replaces `lab`, `startup.sh`, and
-`shutdown.sh`. Controls the entire lab lifecycle.
-
-**How to use:**
+Single script for everything. No other scripts needed day-to-day.
 
 ```bash
-./sre-lab.sh start      # start everything
-./sre-lab.sh stop       # stop everything
-./sre-lab.sh status     # check everything is healthy
-./sre-lab.sh open       # show all URLs
+./sre-lab.sh start              # Start k3s + all services + port-forwards
+./sre-lab.sh stop               # Stop everything cleanly
+./sre-lab.sh status             # Full health check
+./sre-lab.sh book               # Send one test booking through all three services
+./sre-lab.sh traffic bookings   # Generate sustained booking traffic
+./sre-lab.sh logs gateway       # Tail API gateway logs
+./sre-lab.sh chaos payment-outage # Kill payment service — triggers cascade
+./sre-lab.sh outage payment     # Scale payment to 0
+./sre-lab.sh recover all        # Restore all services
+./sre-lab.sh open               # Show all URLs
 ```
+
+**Healthy start output:**
+```
+✓ API Gateway ready
+✓ Booking Service ready
+✓ Payment Service ready
+✓ prometheus ready
+✓ grafana ready
+✓ alertmanager ready
+✓ jaeger ready
+✓ API Gateway    → http://localhost:8888
+✓ Booking Service→ http://localhost:8889
+✓ Payment Service→ http://localhost:8890
+```
+
+---
+
+## API Gateway (`gateway.py`)
+
+**What it is:** Entry point. Routes `/book` requests to Booking Service.
+Also has a legacy `/` endpoint for basic health testing.
+
+**Port:** 8888
+
+**Endpoints:**
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/` | GET | Legacy endpoint — 30% error rate |
+| `/book` | POST | Full booking flow — calls booking service |
+| `/health/live` | GET | Liveness probe |
+| `/health/ready` | GET | Readiness probe |
+| `/health/circuit` | GET | Circuit breaker state |
+| `/metrics` | GET | Prometheus metrics |
 
 **How to test:**
 
 ```bash
-./sre-lab.sh start
-./sre-lab.sh status
-```
+# Liveness
+curl http://localhost:8888/health/live
+# Expected: {"status":"alive","service":"api-gateway"}
 
-**Healthy result:**
-```
-✓ App liveness
-✓ App readiness
-✓ App circuit breaker
-✓ App metrics
-✓ Prometheus
-✓ Grafana
-✓ Alertmanager
-✓ Jaeger
-```
-
-All 8 checks green. Any ⚠ means a pod is still starting — wait 30 seconds
-and run status again.
-
----
-
-## generate-traffic.sh — Traffic simulation
-
-**What it is:** Sends HTTP requests to the app in different patterns to
-populate metrics and trigger alerts.
-
-**How to use:**
-
-```bash
-./generate-traffic.sh mixed        # 3 minutes of randomised traffic (default)
-./generate-traffic.sh normal       # steady baseline — 10 req/10s for 2 mins
-./generate-traffic.sh spike        # sudden burst of 100 concurrent requests
-./generate-traffic.sh error-flood  # hits bad endpoints to drive up error rate
-./generate-traffic.sh slow-burn    # sustained load for 5 minutes
-./generate-traffic.sh slo-breach   # designed to trigger SLO alerts
-```
-
-**How to test:**
-
-```bash
-# Run in background, check metrics are populating
-./generate-traffic.sh mixed &
-sleep 30
-
-# Query Prometheus — should return ~0.70
-curl -s "http://localhost:9090/api/v1/query?query=slo:success_rate_5m" | \
-  python3 -m json.tool | grep value
-```
-
-**Healthy result:** `slo:success_rate_5m` returns approximately `0.70`
-(70% success — your app's 30% error rate in action).
-
-**Note:** The app runs on `http://localhost:8888`. If the script shows
-`OK: 0 | Fail: all` the port-forward has dropped — run `./sre-lab.sh start`.
-
----
-
-## Prometheus — Metrics collection
-
-**What it is:** Scrapes `/metrics` from your app pods every 5 seconds and
-stores time-series data. Evaluates alert rules every 15 seconds.
-
-**URL:** `http://localhost:9090`
-
-**How to use:**
-
-| Task | URL |
-|---|---|
-| Query metrics | http://localhost:9090 → Graph tab |
-| Check targets are up | http://localhost:9090/targets |
-| Check alerts | http://localhost:9090/alerts |
-
-**Key queries to run:**
-
-```promql
-# Is the app being scraped?
-up{job="cloud-lab-app"}
-
-# Current success rate (should be ~0.70 with traffic running)
-slo:success_rate_5m
-
-# p95 latency (should be ~0.2s at rest)
-slo:latency_p95_5m
-
-# Error budget burn rate (will be high due to 30% error rate)
-slo:error_budget_burn_rate_1h
+# Full booking flow
+curl -X POST http://localhost:8888/book \
+  -H "Content-Type: application/json" \
+  -d '{"event_type":"concert","seats":2}'
+# Expected: booking_id, payment_id, trace_id, status: confirmed
 
 # Circuit breaker state
-circuit_breaker_state
+curl http://localhost:8888/health/circuit
+# Expected: {"state":"closed",...}
 ```
-
-**How to test:**
-
-1. Go to `http://localhost:9090/targets`
-2. Confirm `cloud-lab-app` shows **State: UP** for both pods
-3. Run `./generate-traffic.sh mixed` for 1 minute
-4. Query `slo:success_rate_5m` — should return a value, not NaN
-
-**Healthy result:** Two targets showing UP in green, recording rules
-returning real values after traffic flows.
 
 ---
 
-## Grafana — Dashboards
+## Booking Service (`booking.py`)
 
-**What it is:** Visualises Prometheus metrics as charts and gauges.
-Your SRE Overview dashboard has 9 panels.
+**What it is:** Creates booking records and calls Payment Service.
+Middle tier of the distributed system.
 
-**URL:** `http://localhost:3000` (admin/admin)
+**Port:** 8889
 
-**How to use:**
+**Endpoints:**
 
-1. Login with admin/admin
-2. Go to Dashboards → Cloud Lab → SRE Overview
-3. Set time range to "Last 15 minutes"
-4. Run traffic: `./generate-traffic.sh mixed &`
-
-**Dashboard panels:**
-
-| Panel | What it shows | Healthy value |
+| Endpoint | Method | Purpose |
 |---|---|---|
-| Availability (5m) | % of requests succeeding | ~70% (30% error rate is intentional) |
-| Error Budget Remaining | Budget left this month | Will show negative — correct for lab |
-| Burn Rate (1h) | How fast budget is consumed | High number — expected |
-| p95 Latency | Response time for 95% of requests | ~200ms at rest |
-| Request Rate | Requests per second | Rises when traffic runs |
-| Success vs Error | Time series of good/bad requests | Two lines — green and red |
-| Latency Percentiles | p50/p95/p99 over time | All lines around 200ms at rest |
-| Error Budget Over Time | Budget trend | Flat or declining |
-| Burn Rate (1h + 6h) | Both burn rate lines | High but stable |
+| `/bookings` | POST | Create a booking (calls payment service) |
+| `/health/live` | GET | Liveness probe |
+| `/health/ready` | GET | Readiness probe — 503 if circuit open |
+| `/health/circuit` | GET | Circuit breaker state |
+| `/metrics` | GET | Prometheus metrics |
 
 **How to test:**
 
 ```bash
-# Generate a spike and watch the dashboard
-./generate-traffic.sh spike &
-# Open Grafana — watch Request Rate panel spike, then return to 0
+# Direct booking (bypasses gateway)
+curl -X POST http://localhost:8889/bookings \
+  -H "Content-Type: application/json" \
+  -d '{"event_type":"theatre","seats":1}'
+# Expected: booking_id, payment result, trace_id
+
+# Check circuit breaker
+curl http://localhost:8889/health/circuit
 ```
 
-**Healthy result:** All 9 panels show data. Panels may look alarming
-(high burn rate, low availability) — this is correct for the lab setup.
+**Key metrics:**
+```promql
+slo:booking_service:success_rate_5m
+slo:booking_service:bookings_per_minute
+```
 
 ---
 
-## Alertmanager — Alert routing
+## Payment Service (`payment.py`)
 
-**What it is:** Receives alerts from Prometheus and routes them to the
-right destination (Slack for critical, email for warning).
+**What it is:** Processes payments. Strictest SLO (99.9%).
+Called by Booking Service. No downstream dependencies.
 
-**URL:** `http://localhost:9093`
+**Port:** 8890
 
-**How to use:**
+**Endpoints:**
 
-| Task | How |
-|---|---|
-| View active alerts | http://localhost:9093 |
-| Test alert pipeline | `./sre-lab.sh outage` then wait 15s |
-| Check routing | http://localhost:9093/#/status |
-
-**Alert routing:**
-
-| Severity | Destination | Repeat interval |
+| Endpoint | Method | Purpose |
 |---|---|---|
-| Critical | Slack #general | Every 1 hour |
-| Warning | Email | Every 2 hours |
-| Watchdog | Null (silenced) | — |
-| Infrastructure | Null (silenced) | — |
+| `/payments` | POST | Process a payment |
+| `/health/live` | GET | Liveness probe |
+| `/health/ready` | GET | Readiness probe |
+| `/metrics` | GET | Prometheus metrics |
 
 **How to test:**
 
 ```bash
-# Trigger AppDown alert
-./sre-lab.sh outage
+# Direct payment (bypasses gateway and booking)
+curl -X POST http://localhost:8890/payments \
+  -H "Content-Type: application/json" \
+  -d '{"amount":150.00,"method":"card","booking_id":"BK-TEST-001"}'
+# Expected: payment_id, status: approved, trace_id
 
-# Wait 15-20 seconds then check:
-# 1. http://localhost:9090/alerts — AppDown should show FIRING
-# 2. http://localhost:9093 — alert should appear
-# 3. Slack — notification should arrive within 60 seconds
-
-# Recover
-./sre-lab.sh recover
-
-# Check Slack receives resolved notification
+# Check SLO metrics
+# Prometheus: slo:payment_service:success_rate_5m
+# Expected: ~0.95 (5% error rate)
 ```
 
-**Healthy result:** Alert fires within 15s, Slack notified within 60s,
-resolved notification arrives after recovery.
+**Key metrics:**
+```promql
+slo:payment_service:success_rate_5m
+slo:payment_service:payments_per_minute
+slo:payment_service:revenue_per_minute
+```
 
 ---
 
-## Jaeger — Distributed tracing
+## Full distributed flow test
 
-**What it is:** Receives traces from your app via OpenTelemetry and lets
-you see the full journey of each request including timing.
+```bash
+# One command tests everything end to end
+./sre-lab.sh book
+```
 
-**URL:** `http://localhost:16686`
+**Expected response:**
+```json
+{
+  "booking_id": "BK-1234567890-1234",
+  "event_type": "concert",
+  "seats": 2,
+  "amount": 291.03,
+  "payment": {
+    "payment_id": "PAY-1234567890-5678",
+    "status": "approved",
+    "trace_id": "b9e5260a2c44383d92ad60cc4edc508b"
+  },
+  "status": "confirmed",
+  "trace_id": "b9e5260a2c44383d92ad60cc4edc508b"
+}
+```
 
-**How to use:**
+**What to verify:**
+1. `booking_id` starts with `BK-` — Booking Service ran
+2. `payment_id` starts with `PAY-` — Payment Service ran
+3. `trace_id` is the same in both `payment` and root — cross-service tracing working
+4. Open Jaeger at `http://localhost:16686` — search `api-gateway` — find that trace ID — should show 3 services
+
+---
+
+## Traffic profiles
+
+```bash
+./generate-traffic.sh bookings     # Full booking flow — most realistic
+./generate-traffic.sh cascade      # Stress payment → watch cascade up the chain
+./generate-traffic.sh spike        # Sudden burst of 50 concurrent bookings
+./generate-traffic.sh slow-burn    # Sustained load for 5 minutes
+./generate-traffic.sh slo-breach   # Designed to trigger burn rate alerts
+./generate-traffic.sh mixed        # Randomised across all endpoints
+```
+
+**Most useful for demos:** `bookings` for normal operation, `cascade` for showing failure propagation.
+
+---
+
+## Cascade failure scenario
+
+Shows how payment degradation cascades up through all three services.
+
+```bash
+# Step 1: Start traffic
+./generate-traffic.sh bookings &
+
+# Step 2: Kill payment service
+./sre-lab.sh outage payment
+
+# Step 3: Watch cascade in Prometheus
+# slo:payment_service:success_rate_5m → drops to 0
+# slo:booking_service:success_rate_5m → drops (payment calls failing)
+# slo:api_gateway:success_rate_5m     → drops (booking calls failing)
+
+# Step 4: Check alerts firing
+# http://localhost:9090/alerts
+# PaymentServiceDown → fires first
+# BookingServiceHighErrorRate → fires next
+# CascadeFailureDetected → fires when both gateway and booking degraded
+
+# Step 5: Check traces in Jaeger
+# http://localhost:16686 → filter Error: true
+# See payment span failing, booking span catching the error
+
+# Step 6: Recover
+./sre-lab.sh recover payment
+# Watch all three services recover in Grafana
+```
+
+---
+
+## Prometheus — per-service queries
+
+**Success rates:**
+```promql
+slo:api_gateway:success_rate_5m
+slo:booking_service:success_rate_5m
+slo:payment_service:success_rate_5m
+```
+
+**Burn rates (critical threshold: 14.4x):**
+```promql
+slo:api_gateway:error_budget_burn_rate_1h
+slo:booking_service:error_budget_burn_rate_1h
+slo:payment_service:error_budget_burn_rate_1h
+```
+
+**Business metrics:**
+```promql
+slo:booking_service:bookings_per_minute
+slo:payment_service:payments_per_minute
+slo:payment_service:revenue_per_minute
+```
+
+---
+
+## Jaeger — cross-service tracing
+
+**What to look for:**
 
 1. Go to `http://localhost:16686`
-2. Select service: `cloud-lab-api`
+2. Select service: `api-gateway`
 3. Click **Find Traces**
-4. Click any trace to see spans
+4. Click any trace
+5. You should see **3 services** in the trace:
+   - `api-gateway` — root span, calls booking
+   - `booking-service` — child span, calls payment
+   - `payment-service` — grandchild span, processes payment
 
-**How to test:**
-
-```bash
-# Send a request and capture its trace ID
-curl http://localhost:8888/
-# Response includes: "trace_id": "cc29c837e17a04c8..."
-
-# Search for that trace in Jaeger:
-# http://localhost:16686 → search by trace ID
-```
-
-**Healthy result:** Traces appear in Jaeger UI. Each trace shows the
-request duration. Failed requests (500 errors) appear as error traces —
-filter by `Error: true` to see only failures.
-
-**Note:** Jaeger uses in-memory storage — traces reset when the pod restarts.
+**Finding a failed trace:**
+1. Select service: `api-gateway`
+2. Check **Errors only**
+3. Click a failed trace
+4. Look at which service's span is red — that's where the failure originated
 
 ---
 
-## Loki — Log aggregation
-
-**What it is:** Collects structured JSON logs from all pods via Promtail
-and makes them queryable in Grafana.
-
-**How to use (via Grafana):**
-
-1. Go to Grafana → Explore (compass icon)
-2. Select **Loki** as the datasource
-3. Run a query:
-
-```logql
-# All app logs
-{namespace="app"}
-
-# Only error logs
-{namespace="app"} | json | level="WARNING"
-
-# Logs for a specific pod
-{namespace="app", pod="cloud-lab-69ff4558db-2hrzq"}
-
-# Search for a specific trace ID
-{namespace="app"} |= "cc29c837e17a04c8"
-```
-
-**How to test:**
-
-```bash
-# Generate some traffic
-for i in {1..10}; do curl -s http://localhost:8888/ > /dev/null; done
-
-# In Grafana Explore → Loki → query: {namespace="app"}
-# Should see JSON log lines appearing
-```
-
-**Healthy result:** Log lines appear in Grafana with fields: timestamp,
-level, message, trace_id, duration_ms.
-
----
-
-## Chaos Mesh — Fault injection
-
-**What it is:** Runs chaos scenarios as Kubernetes resources. Inject
-pod failures, network delays, and CPU stress without shell scripts.
-
-**How to use:**
-
-```bash
-# Pod kill — kills one pod every 60 seconds
-./sre-lab.sh chaos pod-kill
-
-# Network delay — adds 200ms latency for 5 minutes
-./sre-lab.sh chaos network-delay
-
-# CPU stress — 80% CPU on one pod for 3 minutes
-./sre-lab.sh chaos cpu-stress
-
-# Full outage — kills all pods immediately
-./sre-lab.sh chaos full-outage
-
-# Stop all chaos
-./sre-lab.sh chaos stop
-```
-
-**How to test each scenario:**
-
-**Pod kill:**
-```bash
-./sre-lab.sh traffic mixed &
-./sre-lab.sh chaos pod-kill
-kubectl get pods -n app -w
-# Watch pods being terminated and replaced every 60s
-# Expected: replacement pod ready within 20-30 seconds
-./sre-lab.sh chaos stop
-```
-
-**Network delay:**
-```bash
-./sre-lab.sh traffic spike &
-./sre-lab.sh chaos network-delay
-# Watch Prometheus: slo:latency_p95_5m rises above 0.5
-# Watch Grafana: latency panel climbs
-# Expected: HighLatencyWarning fires after ~90 seconds
-./sre-lab.sh chaos stop
-```
-
-**Full outage:**
-```bash
-./sre-lab.sh chaos full-outage
-# Watch: http://localhost:9090/alerts — AppDown fires within 15s
-# Watch: Slack receives critical notification within 60s
-# Kubernetes automatically replaces all pods
-# Expected: service recovers within 60 seconds automatically
-```
-
-**Healthy result for each:**
-
-| Scenario | Expected outcome |
-|---|---|
-| Pod kill | K8s replaces pod in <30s, traffic continues |
-| Network delay | HighLatencyWarning fires, resolves after chaos ends |
-| CPU stress | kubectl top shows CPU spike, HPA may add replicas |
-| Full outage | AppDown fires, Slack notified, auto-recovery in 60s |
-
----
-
-## CI/CD Pipeline — GitHub Actions
-
-**What it is:** Automated pipeline that runs on every push to main.
-
-**How to view:** https://github.com/EkpesJames/sre-cloud-lab/actions
-
-**Pipeline stages:**
-
-```
-Test → Build → Deploy
-```
-
-| Stage | What runs | Where |
-|---|---|---|
-| Test | ruff lint + 30 pytest tests | GitHub ubuntu-latest |
-| Build | docker build + Trivy scan + push to GHCR | GitHub ubuntu-latest |
-| Deploy | k3s pull + kubectl rollout + Slack notify | Self-hosted WSL2 |
-
-**How to test:**
-
-```bash
-# Make any change and push
-echo "# test" >> README.md
-git add README.md
-git commit -m "test: trigger pipeline"
-git push origin main
-
-# Watch: https://github.com/EkpesJames/sre-cloud-lab/actions
-# Expected: all 3 jobs green within 3-5 minutes
-```
-
-**How to run tests locally:**
-
-```bash
-APP_ERROR_RATE=0.0 APP_LATENCY_SECONDS=0.0 \
-  JAEGER_ENDPOINT=http://localhost:4317 \
-  pytest tests/ -v
-# Expected: 30 passed
-```
-
-**Healthy result:** Three green checkmarks in GitHub Actions.
-Slack receives deployment notification.
-
----
-
-## secrets-audit.sh — Secrets verification
-
-**What it is:** Scans the project for exposed credentials and verifies
-all secrets are properly managed.
-
-**How to use:**
+## Secrets audit
 
 ```bash
 ./sre-lab.sh secrets
-# or directly:
-bash secrets-audit.sh
 ```
 
-**What it checks:**
-
-1. `.env` is not tracked by git
-2. No real credentials in committed files
-3. `.env.example` has only placeholder values
-4. Kubernetes Secrets exist in cluster
-5. k3s registry credentials configured
-6. All required variables set in `.env`
-7. `alertmanager.yml` uses `${VAR}` placeholders not real values
-
-**How to test:**
-
-```bash
-bash secrets-audit.sh
-```
-
-**Healthy result:**
-```
-✓ All secrets checks passed — no issues found
-  Secrets are managed via:
-  • .env file (local, not in git)
-  • Kubernetes Secrets (cluster)
-  • GitHub Actions Secrets (CI/CD)
-  • k3s registries.yaml (image pull)
-```
+Checks all three services have their credentials properly managed via Kubernetes Secrets, `.env`, and k3s registry config.
 
 ---
 
-## Circuit breaker
-
-**What it is:** Automatically stops sending requests to the app when
-the error rate exceeds 50%. Returns 503 immediately instead of failing slowly.
-
-**States:**
-- `closed` — normal operation, requests flow through
-- `open` — error rate too high, all requests rejected with 503
-- `half_open` — trial period, one request allowed through
-
-**How to test:**
-
-```bash
-# Check initial state
-curl http://localhost:8888/health/circuit
-
-# Send enough traffic to trip the breaker
-for i in {1..50}; do curl -s http://localhost:8888/ > /dev/null; done
-
-# Check state — should show "open"
-curl http://localhost:8888/health/circuit
-
-# Wait 30 seconds — should move to "half_open"
-sleep 30
-curl http://localhost:8888/health/circuit
-
-# Send one successful request — should close
-curl http://localhost:8888/
-curl http://localhost:8888/health/circuit
-# Should show "closed" with reset counters
-```
-
-**Healthy result:**
-```json
-{"state":"open","error_count":7,"total_count":14,"threshold":0.5,"timeout_seconds":30}
-```
-Then after 30s:
-```json
-{"state":"closed","error_count":0,"total_count":0,"threshold":0.5,"timeout_seconds":30}
-```
-
-**Note:** Each pod has its own circuit breaker. You may see different
-states on different pods — this is expected behaviour.
-
----
-
-## Health probes
-
-**What they are:** Endpoints that Kubernetes uses to decide whether
-to restart a pod or remove it from the load balancer.
-
-| Probe | Endpoint | K8s action on failure |
-|---|---|---|
-| Liveness | `/health/live` | Restart the container |
-| Readiness | `/health/ready` | Remove from load balancer |
-| Startup | `/health/live` | Wait (up to 30s) before other probes start |
-
-**How to test liveness:**
-
-```bash
-curl http://localhost:8888/health/live
-# Expected: {"status":"alive","timestamp":1234567890.0}  HTTP 200
-```
-
-**How to test readiness:**
-
-```bash
-# Normal state
-curl http://localhost:8888/health/ready
-# Expected: {"status":"ready","dependency":"healthy",...}  HTTP 200
-
-# Break the dependency
-curl http://localhost:8888/health/dependency/break
-curl http://localhost:8888/health/ready
-# Expected: {"status":"not_ready","reason":"dependency_unavailable",...}  HTTP 503
-
-# Restore
-curl http://localhost:8888/health/dependency/restore
-curl http://localhost:8888/health/ready
-# Expected: HTTP 200 again
-```
-
-**Healthy result:** Liveness always 200. Readiness 200 when healthy,
-503 when dependency down or circuit breaker open.
-
----
-
-## HPA — Horizontal Pod Autoscaler
-
-**What it is:** Automatically scales the number of app pods between
-2 and 6 based on CPU utilisation.
-
-**How to check:**
-
-```bash
-kubectl get hpa -n app
-# Shows: current CPU %, min/max replicas, current replicas
-```
-
-**How to test:**
-
-```bash
-# Run CPU stress chaos to trigger scaling
-./sre-lab.sh chaos cpu-stress
-
-# Watch HPA react (may take 1-2 minutes)
-kubectl get hpa -n app -w
-kubectl get pods -n app -w
-
-# Stop chaos
-./sre-lab.sh chaos stop
-
-# Watch scale back down (takes 2+ minutes due to stabilisation window)
-```
-
-**Healthy result:** Replicas increase when CPU > 60%, decrease back
-to 2 when load drops. Scale-up is faster than scale-down by design.
-
----
-
-## Complete end-to-end demo sequence
-
-Run this to demonstrate the full lab in one session:
+## Complete demo sequence (15 minutes)
 
 ```bash
 # 1. Start everything
 ./sre-lab.sh start
 
-# 2. Establish baseline (terminal 1)
-./generate-traffic.sh mixed &
+# 2. Show normal operation
+./sre-lab.sh book
+# → Show the full response with booking ID, payment ID, trace ID
 
-# 3. Check metrics populated (wait 2 minutes)
-# Prometheus: slo:success_rate_5m should return ~0.70
+# 3. Open Jaeger — find the trace
+# → Show 3-service span in Jaeger
 
-# 4. Trigger a chaos scenario (terminal 2)
+# 4. Start traffic
+./generate-traffic.sh bookings &
+
+# 5. Show Prometheus metrics (wait 2 minutes)
+# → slo:payment_service:success_rate_5m
+# → slo:booking_service:bookings_per_minute
+
+# 6. Trigger cascade failure
+./sre-lab.sh outage payment
+# → Watch PaymentServiceDown fire in Prometheus
+# → Watch cascade alerts fire
+# → Show Jaeger error traces
+
+# 7. Recover
+./sre-lab.sh recover payment
+# → Watch all services recover in Grafana
+
+# 8. Run chaos
 ./sre-lab.sh chaos pod-kill
-# Watch: kubectl get pods -n app -w
-# Watch: Grafana availability panel
+# → Watch pods killed and replaced in kubectl get pods -w
 
-# 5. Stop chaos, trigger an outage
+# 9. Stop
 ./sre-lab.sh chaos stop
-./sre-lab.sh outage
-# Watch: http://localhost:9090/alerts — AppDown fires
-# Watch: Slack — critical notification arrives
-
-# 6. Recover
-./sre-lab.sh recover
-# Watch: AppDown resolves
-# Watch: Slack — resolved notification arrives
-
-# 7. Run secrets audit
-./sre-lab.sh secrets
-
-# 8. Stop everything
 ./sre-lab.sh stop
 ```
-
-**Expected total time:** 15-20 minutes for full demo.

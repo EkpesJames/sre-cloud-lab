@@ -42,7 +42,7 @@ spec:
 
       containers:
         - name: cloud-lab
-          image: cloud-lab:local
+          image: api-gateway:local
           # For now, build locally and use: cloud-lab:local
           imagePullPolicy: IfNotPresent
           ports:
@@ -132,4 +132,3 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
-

@@ -1,47 +1,72 @@
-# Cloud SRE Lab
+# Cloud SRE Lab — Distributed Booking System
 
-A production-grade SRE portfolio project running on Kubernetes (k3s on WSL2).
-Demonstrates the full SRE toolkit — observability, alerting, chaos engineering,
-CI/CD, and resilience patterns.
+A production-grade SRE portfolio project demonstrating end-to-end reliability
+engineering across a distributed microservices system — API Gateway, Booking
+Service, and Payment Service — running on Kubernetes (k3s on WSL2).
 
 **Repo:** https://github.com/EkpesJames/sre-cloud-lab
-**Stack:** Python · FastAPI · Kubernetes · Prometheus · Grafana · Loki · Jaeger · Chaos Mesh · GitHub Actions
+
+---
+
+## Architecture
+
+```
+Client
+  │
+  ▼
+API Gateway (cloud-lab)          port 8888
+  │  SLO: 99% availability
+  │  p95 < 500ms
+  │
+  ▼  POST /book
+Booking Service                  port 8889
+  │  SLO: 99.5% availability
+  │  p95 < 300ms
+  │
+  ▼  POST /payments
+Payment Service                  port 8890
+     SLO: 99.9% availability
+     p95 < 200ms
+
+All three services feed into:
+  Prometheus → Grafana → Alertmanager → Slack/Email
+  Loki (logs) + Jaeger (traces)
+  One trace ID flows through all three services
+```
 
 ---
 
 ## Quick start
 
 ```bash
-# 1. Clone the repo
+# 1. Clone
 git clone https://github.com/EkpesJames/sre-cloud-lab.git
 cd sre-cloud-lab
 
-# 2. Copy and fill in credentials
+# 2. Configure credentials
 cp .env.example .env
 nano .env
 
 # 3. Start everything
 ./sre-lab.sh start
 
-# 4. Open in browser
-# App          → http://localhost:8888
-# Grafana      → http://localhost:3000  (admin/admin)
-# Prometheus   → http://localhost:9090
-# Alertmanager → http://localhost:9093
-# Jaeger       → http://localhost:16686
+# 4. Test the full booking flow
+./sre-lab.sh book
 ```
 
 ---
 
-## Prerequisites
+## Access URLs
 
-| Tool | Install |
-|---|---|
-| WSL2 (Ubuntu 24.04) | Windows feature |
-| Docker | `sudo apt install docker.io` |
-| k3s | `curl -sfL https://get.k3s.io \| sh -` |
-| Helm | `curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \| bash` |
-| kubectl | Included with k3s — copy kubeconfig: `sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config` |
+| Service | URL | Notes |
+|---|---|---|
+| API Gateway | http://localhost:8888 | Entry point for all requests |
+| Booking Service | http://localhost:8889 | Direct access for testing |
+| Payment Service | http://localhost:8890 | Direct access for testing |
+| Grafana | http://localhost:3000 | admin/admin |
+| Prometheus | http://localhost:9090 | Metrics + alerts |
+| Alertmanager | http://localhost:9093 | Alert routing |
+| Jaeger | http://localhost:16686 | Distributed traces |
 
 ---
 
@@ -49,166 +74,197 @@ nano .env
 
 ```
 sre-cloud-lab/
-├── sre-lab.sh                  # Master control script
-├── generate-traffic.sh         # Traffic simulation
-├── secrets-audit.sh            # Secrets verification
-├── capacity-baseline.sh        # Load testing
-├── install-chaos-mesh.sh       # Chaos Mesh setup
-├── app/
-│   ├── main.py                 # FastAPI app
-│   └── requirements.txt
-├── docker/
+├── sre-lab.sh                    # Master control script
+├── generate-traffic.sh           # Traffic simulation (7 profiles)
+├── deploy-distributed.sh         # Build + deploy all services
+├── secrets-audit.sh              # Secrets verification
+├── capacity-baseline.sh          # Load testing
+│
+├── api-gateway/                  # API Gateway service
+│   ├── gateway.py                # FastAPI app — routes to booking service
 │   └── Dockerfile
+│
+├── booking-service/              # Booking Service
+│   ├── booking.py                # Creates bookings, calls payment service
+│   └── Dockerfile
+│
+├── payment-service/              # Payment Service
+│   ├── payment.py                # Processes payments — strictest SLO
+│   └── Dockerfile
+│
+├── app/                          # Shared (requirements.txt)
+│   └── requirements.txt
+├── requirements.txt              # Shared Python dependencies
+│
 ├── k8s/
-│   ├── namespaces/             # K8s namespace definitions
-│   ├── app/                    # App manifests (deployment, service, hpa, pdb)
-│   └── monitoring/             # Helm values + PrometheusRule
-├── monitoring/
-│   ├── prometheus.yml          # Scrape config
-│   ├── alerts.yml              # Alert rules
-│   ├── recording_rules.yml     # SLI + error budget rules
-│   └── alertmanager.yml        # Alert routing
-├── grafana/
-│   ├── dashboards/             # Dashboard JSON (as code)
-│   └── provisioning/           # Auto-load config
-├── chaos/                      # Chaos Mesh scenarios
-├── tests/                      # pytest test suite
-├── runbooks/                   # Incident response guides
-├── docs/
-│   ├── SLO.md                  # SLO definitions
-│   ├── PRR.md                  # Production Readiness Review
-│   ├── postmortem-*.md         # Completed postmortems
-│   └── adr/                    # Architecture Decision Records
-└── .github/workflows/ci.yml    # CI/CD pipeline
+│   ├── namespaces/               # app + monitoring namespaces
+│   ├── app/                      # API gateway K8s manifests
+│   ├── booking/                  # Booking service K8s manifests
+│   ├── payment/                  # Payment service K8s manifests
+│   ├── gateway/                  # API gateway configmap (with BOOKING_SERVICE_URL)
+│   └── monitoring/               # Helm values + PrometheusRules (per-service SLOs)
+│
+├── monitoring/                   # Prometheus + Alertmanager config
+├── grafana/                      # Dashboards as code + provisioning
+├── chaos/                        # Chaos Mesh scenarios
+├── tests/                        # pytest test suite
+├── runbooks/                     # Incident response guides
+└── docs/                         # SLO, PRR, ADRs, postmortems
 ```
 
 ---
 
-## The application
+## Services
 
-A FastAPI Python app that simulates a production microservice:
+### API Gateway (`gateway.py`)
+- Entry point for all client requests
+- Routes `/book` to Booking Service
+- Circuit breaker — opens at 50% error rate
+- Retry with exponential backoff (1s/2s)
+- SLO: 99% availability, p95 < 500ms
+- Error rate: 30% (intentional for demo)
 
-- **30% random error rate** — drives realistic SLO breach scenarios
-- **200ms processing delay** — creates measurable latency
-- **Circuit breaker** — opens at 50% errors, closes after 30s
-- **Retry with backoff** — 3 attempts, 1s/2s/4s delays
-- **Graceful shutdown** — drains in-flight requests on SIGTERM
-- **OpenTelemetry tracing** — trace ID on every request
-- **Structured JSON logging** — timestamp, level, trace_id, duration
+### Booking Service (`booking.py`)
+- Creates booking records
+- Calls Payment Service for every booking
+- Circuit breaker — opens at 50% error rate
+- Propagates trace context to Payment Service
+- SLO: 99.5% availability, p95 < 300ms
+- Error rate: 10%
 
-### Endpoints
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /` | Main endpoint — 30% fail rate, 200ms delay |
-| `GET /health/live` | Liveness probe — always 200 if process is alive |
-| `GET /health/ready` | Readiness probe — 503 if circuit open or dependency down |
-| `GET /health/circuit` | Circuit breaker state and counters |
-| `GET /metrics` | Prometheus metrics |
-| `GET /health/dependency/break` | Lab — simulate dependency failure |
-| `GET /health/dependency/restore` | Lab — restore dependency |
-
----
-
-## Master control script
-
-All lab operations go through `./sre-lab.sh`:
-
-```bash
-# Lifecycle
-./sre-lab.sh start              # Start k3s + all port-forwards
-./sre-lab.sh stop               # Stop everything cleanly
-./sre-lab.sh restart            # Stop then start
-./sre-lab.sh status             # Health check all endpoints + pods
-
-# Operations
-./sre-lab.sh deploy             # Build + deploy app to Kubernetes
-./sre-lab.sh logs [target]      # Tail logs (app|prometheus|grafana|alertmanager|jaeger)
-./sre-lab.sh traffic [mode]     # Generate traffic
-./sre-lab.sh chaos [type]       # Run chaos scenario
-./sre-lab.sh outage             # Scale app to 0 replicas
-./sre-lab.sh recover            # Restore app after outage
-
-# Utilities
-./sre-lab.sh secrets            # Run secrets audit
-./sre-lab.sh open               # Print all access URLs
-```
+### Payment Service (`payment.py`)
+- Processes payments — strictest SLO
+- No downstream dependencies
+- SLO: 99.9% availability, p95 < 200ms
+- Error rate: 5%
 
 ---
 
 ## SLOs
 
-| SLO | Target | Alert |
-|---|---|---|
-| Availability | 99% success rate (30-day rolling) | Warning >5% errors, Critical >10% errors |
-| Latency | p95 < 500ms | Warning >500ms, Critical >1000ms |
+| Service | Availability | Latency p95 | Error budget |
+|---|---|---|---|
+| API Gateway | 99.0% | < 500ms | 7h 18m/month |
+| Booking Service | 99.5% | < 300ms | 3h 39m/month |
+| Payment Service | 99.9% | < 200ms | 43m/month |
 
-**Error budget:** 1% of requests per month (~7h 18m equivalent)
-
-Full definition: `docs/SLO.md`
+SLOs tighten downstream — payment has the strictest because a payment failure
+directly impacts revenue.
 
 ---
 
-## Alerts
+## Key SRE concepts demonstrated
 
-| Alert | Condition | Severity | Notification |
-|---|---|---|---|
-| AppDown | App unreachable | Critical | Slack |
-| HighLatencyWarning | p95 > 500ms for 1m | Warning | Email |
-| HighLatencyCritical | p95 > 1000ms for 2m | Critical | Slack |
-| HighErrorRateWarning | Error rate > 5% for 1m | Warning | Email |
-| HighErrorRateCritical | Error rate > 10% for 2m | Critical | Slack |
-| ErrorBudgetBurnRateFast | Burn rate > 14.4x (1h) | Critical | Slack |
-| ErrorBudgetBurnRateSlow | Burn rate > 6x (6h) | Warning | Email |
+| Concept | Implementation |
+|---|---|
+| Per-service SLOs | Different targets for each service |
+| Error budget burn rate | Multi-window (1h + 6h) per service |
+| Cascade failure detection | CascadeFailureDetected alert |
+| Distributed tracing | Same trace ID across all three services |
+| Circuit breaker | Independent per service, per pod |
+| Graceful degradation | Gateway returns 502 when booking fails |
+| Retry with backoff | API Gateway retries booking, booking retries payment |
+| Structured logging | trace_id in every log line for correlation |
+
+---
+
+## Commands
+
+```bash
+# Start/stop
+./sre-lab.sh start
+./sre-lab.sh stop
+./sre-lab.sh restart
+
+# Test the distributed flow
+./sre-lab.sh book                    # One test booking
+./sre-lab.sh traffic bookings        # Sustained booking traffic
+./sre-lab.sh traffic cascade         # Cascade failure simulation
+
+# Chaos scenarios
+./sre-lab.sh chaos payment-outage    # Kill payment → cascades up
+./sre-lab.sh chaos pod-kill          # Kill gateway pods randomly
+./sre-lab.sh chaos network-delay     # Add 200ms latency to gateway
+./sre-lab.sh chaos stop              # Stop all chaos
+
+# Service outage simulation
+./sre-lab.sh outage payment          # Scale payment to 0
+./sre-lab.sh outage all              # Full system outage
+./sre-lab.sh recover all             # Restore everything
+
+# Observability
+./sre-lab.sh logs gateway            # API gateway logs
+./sre-lab.sh logs booking            # Booking service logs
+./sre-lab.sh logs payment            # Payment service logs
+./sre-lab.sh logs all                # All service logs
+
+# Utilities
+./sre-lab.sh status                  # Full health check
+./sre-lab.sh secrets                 # Secrets audit
+./sre-lab.sh open                    # Show all URLs
+```
+
+---
+
+## Observability
+
+### Prometheus queries (per service)
+
+```promql
+# Success rates
+slo:api_gateway:success_rate_5m
+slo:booking_service:success_rate_5m
+slo:payment_service:success_rate_5m
+
+# Burn rates
+slo:api_gateway:error_budget_burn_rate_1h
+slo:booking_service:error_budget_burn_rate_1h
+slo:payment_service:error_budget_burn_rate_1h
+
+# Latency
+slo:api_gateway:latency_p95_5m
+slo:booking_service:latency_p95_5m
+slo:payment_service:latency_p95_5m
+
+# Business metrics
+slo:booking_service:bookings_per_minute
+slo:payment_service:payments_per_minute
+slo:payment_service:revenue_per_minute
+```
+
+### Jaeger — cross-service tracing
+
+Every `/book` request produces a trace visible in Jaeger showing spans from
+all three services. Search by `trace_id` returned in the API response.
+
+### Alerts
+
+| Alert | Condition | Severity |
+|---|---|---|
+| APIGatewayHighErrorRate | Burn rate > 14.4x | Critical |
+| BookingServiceHighErrorRate | Error rate > 5% | Warning |
+| BookingServiceDown | Unreachable | Critical |
+| PaymentServiceHighErrorRate | Error rate > 1% | Critical |
+| PaymentServiceDown | Unreachable | Critical |
+| PaymentServiceHighLatency | p95 > 200ms | Warning |
+| CascadeFailureDetected | Both gateway and booking degraded | Critical |
 
 ---
 
 ## CI/CD pipeline
 
-Every push to `main` triggers:
-
+Every push to `main`:
 ```
-Test (ubuntu-latest)
-  └── pip install → ruff lint → 30 pytest tests
-
-Build (ubuntu-latest, needs: test)
-  └── docker build → Trivy CVE scan → push to GHCR
-
-Deploy (self-hosted WSL2, needs: build)
-  └── k3s pull → kubectl set image → rollout status → Slack notify
+Test → Build (3 images) → Trivy scan → Push to GHCR → Deploy to k3s → Slack notify
 ```
-
-**GitHub Secrets required:**
-- `PAT_TOKEN` — GitHub Personal Access Token (repo + write:packages)
-- `SLACK_WEBHOOK_URL` — Slack incoming webhook URL
 
 ---
 
 ## Known WSL2 limitations
 
-| Issue | Cause | Impact |
-|---|---|---|
-| node-exporter disabled | Host path mount restriction | No host CPU/memory metrics |
-| NodePort not directly accessible | WSL2 network namespace | Use kubectl port-forward |
-| Per-pod circuit breaker state | No shared cache | Each pod tracks independently |
-| KubeAPIErrorBudgetBurn alert firing | Resource constraints | Routed to null receiver |
-
----
-
-## Runbooks
-
-| Alert | Runbook |
+| Limitation | Impact |
 |---|---|
-| AppDown | `runbooks/AppDown.md` |
-| HighLatency | `runbooks/HighLatency.md` |
-| HighErrorRate | `runbooks/HighErrorRate.md` |
-
----
-
-## Architecture decisions
-
-| Decision | Document |
-|---|---|
-| Why k3s over minikube | `docs/adr/ADR-001-k3s-over-minikube.md` |
-| Why multi-window burn rate alerting | `docs/adr/ADR-002-burn-rate-alerting.md` |
-| Why Loki over Elasticsearch | `docs/adr/ADR-003-loki-over-elasticsearch.md` |
+| node-exporter disabled | No host CPU/memory metrics |
+| Per-pod circuit breaker state | Each pod tracks independently |
+| In-memory Jaeger storage | Traces reset on pod restart |
+| NodePort not directly accessible | Use kubectl port-forward |

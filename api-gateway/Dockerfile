@@ -7,9 +7,10 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY app/ /app
+COPY api-gateway/gateway.py /app/gateway.py
+COPY requirements.txt .
 
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Health check — Docker marks container unhealthy if this fails 3 times
 # Interval: check every 10 seconds
@@ -19,5 +20,4 @@ RUN pip install -r requirements.txt
 HEALTHCHECK --interval=10s --timeout=5s --retries=3 --start-period=15s \
   CMD curl -f http://localhost:80/health/live || exit 1
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "80"]
-
+CMD ["uvicorn", "gateway:app", "--host", "0.0.0.0", "--port", "80"]
