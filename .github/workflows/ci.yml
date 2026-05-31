@@ -99,7 +99,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: docker/Dockerfile
+          file: api-gateway/Dockerfile
           push: false
           load: true
           tags: ${{ steps.image.outputs.name }}:scan-target
@@ -120,7 +120,7 @@ jobs:
         id: build
         with:
           context: .
-          file: docker/Dockerfile
+          file: api-gateway/Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
