@@ -61,7 +61,9 @@ tracer = trace.get_tracer(SERVICE_NAME)
 
 # ── Circuit breaker ───────────────────────────────────────────────────────────
 class CircuitBreaker:
-    CLOSED = "closed"; OPEN = "open"; HALF_OPEN = "half_open"
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
 
     def __init__(self, threshold, timeout):
         self.threshold = threshold
