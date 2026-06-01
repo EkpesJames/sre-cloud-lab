@@ -15,20 +15,20 @@ spec:
       rules:
         - record: slo:api_gateway:success_rate_5m
           expr: |
-            sum(rate(http_requests_total{service="api-gateway",status="success"}[5m]))
+            sum(rate(http_requests_total{job="api-gateway",status="success"}[5m]))
             /
-            sum(rate(http_requests_total{service="api-gateway"}[5m]))
+            sum(rate(http_requests_total{job="api-gateway"}[5m]))
 
         - record: slo:api_gateway:success_rate_1h
           expr: |
-            sum(rate(http_requests_total{service="api-gateway",status="success"}[1h]))
+            sum(rate(http_requests_total{job="api-gateway",status="success"}[1h]))
             /
-            sum(rate(http_requests_total{service="api-gateway"}[1h]))
+            sum(rate(http_requests_total{job="api-gateway"}[1h]))
 
         - record: slo:api_gateway:latency_p95_5m
           expr: |
             histogram_quantile(0.95,
-              sum(rate(http_request_duration_seconds_bucket{service="api-gateway"}[5m]))
+              sum(rate(http_request_duration_seconds_bucket{job="api-gateway"}[5m]))
               without(instance,pod)
             )
 
@@ -38,7 +38,7 @@ spec:
 
         - record: slo:api_gateway:request_rate_5m
           expr: |
-            sum(rate(http_requests_total{service="api-gateway"}[5m]))
+            sum(rate(http_requests_total{job="api-gateway"}[5m]))
 
     # ── Booking Service SLI Recording Rules ───────────────────────────────────
     - name: booking_service_slo_rules
@@ -46,20 +46,20 @@ spec:
       rules:
         - record: slo:booking_service:success_rate_5m
           expr: |
-            sum(rate(http_requests_total{service="booking-service",status="success"}[5m]))
+            sum(rate(http_requests_total{job="booking-service",status="success"}[5m]))
             /
-            sum(rate(http_requests_total{service="booking-service"}[5m]))
+            sum(rate(http_requests_total{job="booking-service"}[5m]))
 
         - record: slo:booking_service:success_rate_1h
           expr: |
-            sum(rate(http_requests_total{service="booking-service",status="success"}[1h]))
+            sum(rate(http_requests_total{job="booking-service",status="success"}[1h]))
             /
-            sum(rate(http_requests_total{service="booking-service"}[1h]))
+            sum(rate(http_requests_total{job="booking-service"}[1h]))
 
         - record: slo:booking_service:latency_p95_5m
           expr: |
             histogram_quantile(0.95,
-              sum(rate(http_request_duration_seconds_bucket{service="booking-service"}[5m]))
+              sum(rate(http_request_duration_seconds_bucket{job="booking-service"}[5m]))
               without(instance,pod)
             )
 
@@ -69,7 +69,7 @@ spec:
 
         - record: slo:booking_service:request_rate_5m
           expr: |
-            sum(rate(http_requests_total{service="booking-service"}[5m]))
+            sum(rate(http_requests_total{job="booking-service"}[5m]))
 
         - record: slo:booking_service:bookings_per_minute
           expr: |
@@ -81,20 +81,20 @@ spec:
       rules:
         - record: slo:payment_service:success_rate_5m
           expr: |
-            sum(rate(http_requests_total{service="payment-service",status="success"}[5m]))
+            sum(rate(http_requests_total{job="payment-service",status="success"}[5m]))
             /
-            sum(rate(http_requests_total{service="payment-service"}[5m]))
+            sum(rate(http_requests_total{job="payment-service"}[5m]))
 
         - record: slo:payment_service:success_rate_1h
           expr: |
-            sum(rate(http_requests_total{service="payment-service",status="success"}[1h]))
+            sum(rate(http_requests_total{job="payment-service",status="success"}[1h]))
             /
-            sum(rate(http_requests_total{service="payment-service"}[1h]))
+            sum(rate(http_requests_total{job="payment-service"}[1h]))
 
         - record: slo:payment_service:latency_p95_5m
           expr: |
             histogram_quantile(0.95,
-              sum(rate(http_request_duration_seconds_bucket{service="payment-service"}[5m]))
+              sum(rate(http_request_duration_seconds_bucket{job="payment-service"}[5m]))
               without(instance,pod)
             )
 
@@ -130,9 +130,9 @@ spec:
         # Booking Service alerts (SLO: 99.5%)
         - alert: BookingServiceHighErrorRate
           expr: |
-            sum(rate(http_requests_total{service="booking-service",status="error"}[5m]))
+            sum(rate(http_requests_total{job="booking-service",status="error"}[5m]))
             /
-            sum(rate(http_requests_total{service="booking-service"}[5m])) > 0.05
+            sum(rate(http_requests_total{job="booking-service"}[5m])) > 0.05
           for: 1m
           labels:
             severity: warning
@@ -143,7 +143,7 @@ spec:
             description: "Current error rate {{ $value | humanizePercentage }}. SLO allows 0.5%."
 
         - alert: BookingServiceDown
-          expr: up{service="booking-service"} == 0
+          expr: up{job="booking-service"} == 0
           for: 10s
           labels:
             severity: critical
@@ -156,9 +156,9 @@ spec:
         # Payment Service alerts (SLO: 99.9% — strictest)
         - alert: PaymentServiceHighErrorRate
           expr: |
-            sum(rate(http_requests_total{service="payment-service",status="error"}[5m]))
+            sum(rate(http_requests_total{job="payment-service",status="error"}[5m]))
             /
-            sum(rate(http_requests_total{service="payment-service"}[5m])) > 0.01
+            sum(rate(http_requests_total{job="payment-service"}[5m])) > 0.01
           for: 1m
           labels:
             severity: critical
@@ -169,7 +169,7 @@ spec:
             description: "Current error rate {{ $value | humanizePercentage }}. SLO allows 0.1%."
 
         - alert: PaymentServiceDown
-          expr: up{service="payment-service"} == 0
+          expr: up{job="payment-service"} == 0
           for: 10s
           labels:
             severity: critical

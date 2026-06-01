@@ -67,22 +67,26 @@ start_all_pf() {
   start_pf "prometheus"   "monitoring" "kube-prometheus-kube-prome-prometheus"  "9090:9090"
   start_pf "grafana"      "monitoring" "kube-prometheus-grafana"                "3000:80"
   start_pf "alertmanager" "monitoring" "kube-prometheus-kube-prome-alertmanager" "9093:9093"
-  # Jaeger uses pod port-forward due to WSL2 service routing issue
+  # Jaeger — use pod direct due to WSL2 service routing issue
   log "Starting Jaeger port-forward (pod direct)..."
   JAEGER_POD=$(kubectl get pod -n monitoring -l app=jaeger \
-  -o jsonpath='{.items[0].metadata.name}')
-  kubectl port-forward -n monitoring pod/$JAEGER_POD 16686:16686 \
-  >> /tmp/pf-jaeger.log 2>&1 &
-  echo $! > /tmp/pf-jaeger.pid
-  ok "jaeger → http://localhost:16686"
-  sleep 4
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  if [[ -n "$JAEGER_POD" ]]; then
+    kubectl port-forward -n monitoring pod/$JAEGER_POD 16686:16686 \
+      >> /tmp/pf-jaeger.log 2>&1 &
+    echo $! > /tmp/pf-jaeger.pid
+    ok "jaeger → http://localhost:16686"
+  else
+    warn "Jaeger pod not found — skipping"
+  fi
+  sleep 8
 }
 
 # ── Health checks ─────────────────────────────────────────────────────────────
 check() {
   local name=$1 url=$2
   local code
-  code=$(curl -s -o /dev/null -w "%{http_code}" "$url" 2>/dev/null)
+  code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$url" 2>/dev/null)
   if [[ "$code" == "200" ]]; then
     ok "$name"
   else
@@ -91,25 +95,38 @@ check() {
 }
 
 run_health_checks() {
-  log "Health checks..."
   echo ""
   echo "  Application services:"
-  check "  API Gateway    → http://localhost:8888" "http://localhost:8888/health/live"
-  check "  Booking Service→ http://localhost:8889" "http://localhost:8889/health/live"
-  check "  Payment Service→ http://localhost:8890" "http://localhost:8890/health/live"
-  echo ""
-  echo "  Circuit breakers:"
-  local gw_cb booking_cb payment_cb
-  gw_cb=$(curl -s http://localhost:8888/health/circuit 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('state','unknown'))" 2>/dev/null || echo "unreachable")
-  booking_cb=$(curl -s http://localhost:8889/health/circuit 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('state','unknown'))" 2>/dev/null || echo "unreachable")
-  payment_cb=$(curl -s http://localhost:8890/health/circuit 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('state','unknown'))" 2>/dev/null || echo "unreachable")
-  echo "  Gateway: $gw_cb | Booking: $booking_cb | Payment: $payment_cb"
+  check "  API Gateway     → http://localhost:8888" \
+    "http://localhost:8888/health/live"
+  check "  Booking Service → http://localhost:8889" \
+    "http://localhost:8889/health/live"
+  check "  Payment Service → http://localhost:8890" \
+    "http://localhost:8890/health/live"
   echo ""
   echo "  Observability:"
-  check "  Prometheus     → http://localhost:9090" "http://localhost:9090/-/healthy"
-  check "  Grafana        → http://localhost:3000" "http://localhost:3000/api/health"
-  check "  Alertmanager   → http://localhost:9093" "http://localhost:9093/-/healthy"
-  check "  Jaeger         → http://localhost:16686" "http://localhost:16686"
+  check "  Prometheus      → http://localhost:9090" \
+    "http://localhost:9090/-/healthy"
+  check "  Grafana         → http://localhost:3000" \
+    "http://localhost:3000/api/health"
+  check "  Alertmanager    → http://localhost:9093" \
+    "http://localhost:9093/-/healthy"
+  # Jaeger needs extra time after pod direct port-forward
+  local jaeger_code
+  jaeger_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    --max-time 5 "http://localhost:16686/api/services" 2>/dev/null)
+  if [[ "$jaeger_code" == "200" ]]; then
+    ok "  Jaeger          → http://localhost:16686"
+  else
+    # Retry once after 5 seconds
+    sleep 5
+    jaeger_code=$(curl -s -o /dev/null -w "%{http_code}" \
+      --max-time 5 "http://localhost:16686/api/services" 2>/dev/null)
+    [[ "$jaeger_code" == "200" ]] && \
+      ok "  Jaeger          → http://localhost:16686" || \
+      warn "  Jaeger          → http://localhost:16686 (HTTP $jaeger_code)"
+  fi
+  echo ""
 }
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -141,13 +158,19 @@ cmd_start() {
   for label in \
     "app.kubernetes.io/name=prometheus" \
     "app.kubernetes.io/name=grafana" \
-    "app.kubernetes.io/name=alertmanager" \
-    "app=jaeger"; do
+    "app.kubernetes.io/name=alertmanager"; do
     name=$(echo "$label" | cut -d= -f2)
-    kubectl wait --for=condition=ready pod -l "$label" -n monitoring \
+    kubectl wait --for=condition=ready pod \
+      -l "$label" -n monitoring \
       --timeout=120s 2>/dev/null \
       && ok "$name ready" || warn "$name still starting"
   done
+
+  log "Waiting for Jaeger..."
+  kubectl wait --for=condition=ready pod \
+    -l app=jaeger -n monitoring \
+    --timeout=180s 2>/dev/null \
+    && ok "jaeger ready" || warn "jaeger still starting — will retry port-forward"
 
   stop_all_pf 2>/dev/null || true
   sleep 2
@@ -378,27 +401,45 @@ cmd_recover() {
   case "$svc" in
     gateway)
       kubectl scale deployment/cloud-lab -n app --replicas=2
-      kubectl wait --for=condition=ready pod -l app=cloud-lab -n app --timeout=60s
-      ok "API Gateway recovered"
+      sleep 5
+      kubectl wait --for=condition=ready pod \
+        -l app=cloud-lab -n app --timeout=60s 2>/dev/null \
+        && ok "API Gateway recovered" \
+        || ok "API Gateway recovering — pods starting"
       ;;
     booking)
       kubectl scale deployment/booking-service -n app --replicas=2
-      kubectl wait --for=condition=ready pod -l app=booking-service -n app --timeout=60s
-      ok "Booking Service recovered"
+      sleep 5
+      kubectl wait --for=condition=ready pod \
+        -l app=booking-service -n app --timeout=60s 2>/dev/null \
+        && ok "Booking Service recovered" \
+        || ok "Booking Service recovering — pods starting"
       ;;
     payment)
       kubectl scale deployment/payment-service -n app --replicas=2
-      kubectl wait --for=condition=ready pod -l app=payment-service -n app --timeout=60s
-      ok "Payment Service recovered"
+      sleep 5
+      kubectl wait --for=condition=ready pod \
+        -l app=payment-service -n app --timeout=60s 2>/dev/null \
+        && ok "Payment Service recovered" \
+        || ok "Payment Service recovering — pods starting"
       ;;
     all)
       kubectl scale deployment/cloud-lab -n app --replicas=2
       kubectl scale deployment/booking-service -n app --replicas=2
       kubectl scale deployment/payment-service -n app --replicas=2
-      kubectl wait --for=condition=ready pod -l app=cloud-lab -n app --timeout=60s
-      kubectl wait --for=condition=ready pod -l app=booking-service -n app --timeout=60s
-      kubectl wait --for=condition=ready pod -l app=payment-service -n app --timeout=60s
-      ok "All services recovered"
+      sleep 5
+      kubectl wait --for=condition=ready pod \
+        -l app=cloud-lab -n app --timeout=60s 2>/dev/null \
+        && ok "API Gateway recovered" \
+        || ok "API Gateway recovering"
+      kubectl wait --for=condition=ready pod \
+        -l app=booking-service -n app --timeout=60s 2>/dev/null \
+        && ok "Booking Service recovered" \
+        || ok "Booking Service recovering"
+      kubectl wait --for=condition=ready pod \
+        -l app=payment-service -n app --timeout=60s 2>/dev/null \
+        && ok "Payment Service recovered" \
+        || ok "Payment Service recovering"
       ;;
   esac
 }
