@@ -61,7 +61,7 @@ All three services feed into:
 
 ---
 
-## Quick start
+## Quick Start Guide
 
 ```bash
 git clone https://github.com/EkpesJames/sre-cloud-lab.git
